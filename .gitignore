@@ -1,3 +1,5 @@
 .idea
 resources/app/vendor
 output
+.DS_Store
+*.keys
