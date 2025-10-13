@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"crypto/md5"
 	"encoding/gob"
 	"fmt"
 	"github.com/boltdb/bolt"
@@ -9,6 +10,8 @@ import (
 	"go.uber.org/zap"
 	"log"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 const (
@@ -19,10 +22,38 @@ type PersistentDB struct {
 	db *bolt.DB
 }
 
+// generateDBName creates a unique DB name based on scan paths
+func generateDBName(baseFolder string, scanPaths []string) string {
+	// Combine all scan paths into a single string
+	pathsString := strings.Join(scanPaths, "|")
+
+	// Generate MD5 hash
+	hash := md5.Sum([]byte(pathsString))
+	hashString := fmt.Sprintf("%x", hash)
+
+	// Take first 8 characters for readability
+	return filepath.Join(baseFolder, fmt.Sprintf("slm_%s.db", hashString[:8]))
+}
+
 func NewPersistentDB(baseFolder string) (*PersistentDB, error) {
-	// Open the my.db data file in your current directory.
+	// Use default name for backward compatibility
+	return NewPersistentDBWithName(baseFolder, "slm.db")
+}
+
+func NewPersistentDBWithScanPaths(baseFolder string, scanPaths []string) (*PersistentDB, error) {
+	dbPath := generateDBName(baseFolder, scanPaths)
+	return NewPersistentDBWithPath(dbPath)
+}
+
+func NewPersistentDBWithName(baseFolder string, dbName string) (*PersistentDB, error) {
+	dbPath := filepath.Join(baseFolder, dbName)
+	return NewPersistentDBWithPath(dbPath)
+}
+
+func NewPersistentDBWithPath(dbPath string) (*PersistentDB, error) {
+	// Open the db data file.
 	// It will be created if it doesn't exist.
-	db, err := bolt.Open(filepath.Join(baseFolder, "slm.db"), 0600, &bolt.Options{Timeout: 1 * 60})
+	db, err := bolt.Open(dbPath, 0600, &bolt.Options{Timeout: 5 * time.Second})
 	if err != nil {
 		log.Fatal(err)
 		return nil, err

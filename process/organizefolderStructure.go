@@ -1,24 +1,41 @@
 package process
 
 import (
-	"github.com/giwty/switch-library-manager/db"
-	"github.com/giwty/switch-library-manager/settings"
-	"go.uber.org/zap"
 	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
-	"robpike.io/nihongo"
 	"strconv"
 	"strings"
+
+	"github.com/giwty/switch-library-manager/db"
+	"github.com/giwty/switch-library-manager/settings"
+	"go.uber.org/zap"
 )
 
 var (
-	folderIllegalCharsRegex = regexp.MustCompile(`[/\\?%*:;=|"<>]`)
-	nonAscii                = regexp.MustCompile("[a-zA-Z0-9áéíóú@#%&',.\\s-\\[\\]\\(\\)\\+]")
+	fileIllegalCharsRegex   = regexp.MustCompile(`[/\\?%*:;=|"<>]`)
+	folderIllegalCharsRegex = regexp.MustCompile(`[?%*:;=|"<>]`)
+	filenonAscii            = regexp.MustCompile("[a-zA-Z0-9áéíóú@#%&',.\\s-\\[\\]\\(\\)\\+\u3131-\u3163\uac00-\ud7af]")
+	foldernonAscii          = regexp.MustCompile("[a-zA-Z0-9áéíóú@#%&',.\\s-\\[\\]\\(\\)\\+/\\\\\u3131-\u3163\uac00-\ud7af]")
 	cjk                     = regexp.MustCompile("[\u2f70-\u2FA1\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f\\p{Katakana}\\p{Hiragana}\\p{Hangul}]")
 )
+
+type DryRunResult struct {
+	From        string `json:"from"`
+	To          string `json:"to"`
+	Type        string `json:"type"` // "file", "folder", "delete"
+	GameName    string `json:"game_name"`
+	Action      string `json:"action"` // "move", "rename", "create", "delete"
+	IsDirectory bool   `json:"is_directory"`
+}
+
+type OrganizeResults struct {
+	DryRunResults []DryRunResult `json:"dry_run_results"`
+	TotalFiles    int            `json:"total_files"`
+	TotalFolders  int            `json:"total_folders"`
+}
 
 func DeleteOldUpdates(baseFolder string, localDB *db.LocalSwitchFilesDB, updateProgress db.ProgressUpdater) {
 	i := 0
@@ -58,14 +75,20 @@ func DeleteOldUpdates(baseFolder string, localDB *db.LocalSwitchFilesDB, updateP
 func OrganizeByFolders(baseFolder string,
 	localDB *db.LocalSwitchFilesDB,
 	titlesDB *db.SwitchTitlesDB,
-	updateProgress db.ProgressUpdater) {
+	updateProgress db.ProgressUpdater) *OrganizeResults {
 
 	//validate template rules
 
 	options := settings.ReadSettings(baseFolder).OrganizeOptions
 	if !IsOptionsValid(options) {
 		zap.S().Error("the organize options in settings.json are not valid, please check that the template contains file/folder name")
-		return
+		return nil
+	}
+
+	results := &OrganizeResults{
+		DryRunResults: []DryRunResult{},
+		TotalFiles:    0,
+		TotalFolders:  0,
 	}
 	i := 0
 	tasksSize := len(localDB.TitlesMap) + 2
@@ -102,12 +125,10 @@ func OrganizeByFolders(baseFolder string,
 		if options.CreateFolderPerGame {
 			folderToCreate := getFolderName(options, templateData)
 			destinationPath = filepath.Join(baseFolder, folderToCreate)
-			if _, err := os.Stat(destinationPath); os.IsNotExist(err) {
-				err = os.Mkdir(destinationPath, os.ModePerm)
-				if err != nil {
-					zap.S().Errorf("Failed to create folder %v - %v\n", folderToCreate, err)
-					continue
-				}
+			err := createFolderOrRecord(destinationPath, titleName, options.DryRun, results)
+			if err != nil {
+				zap.S().Errorf("Failed to create folder %v - %v\n", folderToCreate, err)
+				continue
 			}
 		}
 
@@ -123,7 +144,7 @@ func OrganizeByFolders(baseFolder string,
 				if _, err := strconv.Atoi(file.Name()[len(file.Name())-1:]); err == nil {
 					from := filepath.Join(v.File.ExtendedInfo.BaseFolder, file.Name())
 					to := filepath.Join(destinationPath, file.Name())
-					err := moveFile(from, to)
+					err := moveFileOrRecord(from, to, titleName, options.DryRun, results)
 					if err != nil {
 						zap.S().Errorf("Failed to move file [%v]\n", err)
 						continue
@@ -137,7 +158,7 @@ func OrganizeByFolders(baseFolder string,
 		//process base title
 		from := filepath.Join(v.File.ExtendedInfo.BaseFolder, v.File.ExtendedInfo.FileName)
 		to := filepath.Join(destinationPath, getFileName(options, v.File.ExtendedInfo.FileName, templateData))
-		err := moveFile(from, to)
+		err := moveFileOrRecord(from, to, titleName, options.DryRun, results)
 		if err != nil {
 			zap.S().Errorf("Failed to move file [%v]\n", err)
 			continue
@@ -158,11 +179,18 @@ func OrganizeByFolders(baseFolder string,
 
 			from = filepath.Join(updateInfo.ExtendedInfo.BaseFolder, updateInfo.ExtendedInfo.FileName)
 			if options.CreateFolderPerGame {
+				folderToCreate := getFolderName(options, templateData)
+				destinationPath = filepath.Join(baseFolder, folderToCreate)
+				err := createFolderOrRecord(destinationPath, titleName, options.DryRun, results)
+				if err != nil {
+					zap.S().Errorf("Failed to create folder %v - %v\n", folderToCreate, err)
+					continue
+				}
 				to = filepath.Join(destinationPath, getFileName(options, updateInfo.ExtendedInfo.FileName, templateData))
 			} else {
 				to = filepath.Join(updateInfo.ExtendedInfo.BaseFolder, getFileName(options, updateInfo.ExtendedInfo.FileName, templateData))
 			}
-			err := moveFile(from, to)
+			err := moveFileOrRecord(from, to, titleName, options.DryRun, results)
 			if err != nil {
 				zap.S().Errorf("Failed to move file [%v]\n", err)
 				continue
@@ -179,11 +207,20 @@ func OrganizeByFolders(baseFolder string,
 			templateData[settings.TEMPLATE_DLC_NAME] = getDlcName(titlesDB.TitlesMap[k], dlc)
 			from = filepath.Join(dlc.ExtendedInfo.BaseFolder, dlc.ExtendedInfo.FileName)
 			if options.CreateFolderPerGame {
+				folderToCreate := getFolderName(options, templateData)
+				destinationPath = filepath.Join(baseFolder, folderToCreate)
+				if _, err := os.Stat(destinationPath); os.IsNotExist(err) {
+					err = os.Mkdir(destinationPath, os.ModePerm)
+					if err != nil {
+						zap.S().Errorf("Failed to create folder %v - %v\n", folderToCreate, err)
+						continue
+					}
+				}
 				to = filepath.Join(destinationPath, getFileName(options, dlc.ExtendedInfo.FileName, templateData))
 			} else {
 				to = filepath.Join(dlc.ExtendedInfo.BaseFolder, getFileName(options, dlc.ExtendedInfo.FileName, templateData))
 			}
-			err = moveFile(from, to)
+			err = moveFileOrRecord(from, to, titleName, options.DryRun, results)
 			if err != nil {
 				zap.S().Errorf("Failed to move file [%v]\n", err)
 				continue
@@ -210,6 +247,8 @@ func OrganizeByFolders(baseFolder string,
 			updateProgress.UpdateProgress(i, tasksSize, "done")
 		}
 	}
+
+	return results
 }
 
 func IsOptionsValid(options settings.OrganizeOptions) bool {
@@ -253,27 +292,29 @@ func getDlcName(switchTitle *db.SwitchTitle, file db.SwitchFileInfo) string {
 }
 
 func getTitleName(switchTitle *db.SwitchTitle, v *db.SwitchGameFiles) string {
-	if switchTitle != nil && switchTitle.Attributes.Name != "" {
-		res := cjk.FindAllString(switchTitle.Attributes.Name, -1)
-		if len(res) == 0 {
-			return switchTitle.Attributes.Name
-		}
-	}
+	// Read user's locale preferences
+	appSettings := settings.ReadSettings(".")
 
+	// Try to get title name from NACP using locale priority
 	if v.File.Metadata.Ncap != nil {
-		name := v.File.Metadata.Ncap.TitleName["AmericanEnglish"].Title
-		if name != "" {
+		if name := v.File.Metadata.Ncap.GetBestTitleName(appSettings.LocalePriority); name != "" {
 			return name
 		}
 	}
-	//for non eshop games (cartridge only), grab the name from the file
-	return db.ParseTitleNameFromFileName(v.File.ExtendedInfo.FileName)
 
+	// Fallback to titleDB name
+	if switchTitle != nil && switchTitle.Attributes.Name != "" {
+		name := switchTitle.Attributes.Name
+		return strings.ReplaceAll(name, "\n", " ")
+	}
+
+	// Last resort: parse from filename
+	return db.ParseTitleNameFromFileName(v.File.ExtendedInfo.FileName)
 }
 
 func getFolderName(options settings.OrganizeOptions, templateData map[string]string) string {
 
-	return applyTemplate(templateData, options.SwitchSafeFileNames, options.FolderNameTemplate)
+	return applyTemplate(templateData, options.SwitchSafeFileNames, options.FolderNameTemplate, true)
 }
 
 func getFileName(options settings.OrganizeOptions, originalName string, templateData map[string]string) string {
@@ -281,7 +322,7 @@ func getFileName(options settings.OrganizeOptions, originalName string, template
 		return originalName
 	}
 	ext := path.Ext(originalName)
-	result := applyTemplate(templateData, options.SwitchSafeFileNames, options.FileNameTemplate)
+	result := applyTemplate(templateData, options.SwitchSafeFileNames, options.FileNameTemplate, false)
 	return result + ext
 }
 
@@ -293,7 +334,54 @@ func moveFile(from string, to string) error {
 	return err
 }
 
-func applyTemplate(templateData map[string]string, useSafeNames bool, template string) string {
+func moveFileOrRecord(from, to, gameName string, isDryRun bool, results *OrganizeResults) error {
+	if from == to {
+		return nil
+	}
+
+	if isDryRun {
+		// Record the intended action instead of performing it
+		result := DryRunResult{
+			From:        from,
+			To:          to,
+			Type:        "file",
+			GameName:    gameName,
+			Action:      "move",
+			IsDirectory: false,
+		}
+		results.DryRunResults = append(results.DryRunResults, result)
+		results.TotalFiles++
+		return nil
+	}
+
+	// Actually move the file
+	return moveFile(from, to)
+}
+
+func createFolderOrRecord(folderPath, gameName string, isDryRun bool, results *OrganizeResults) error {
+	if _, err := os.Stat(folderPath); os.IsNotExist(err) {
+		if isDryRun {
+			// Record the intended folder creation
+			result := DryRunResult{
+				From:        "",
+				To:          folderPath,
+				Type:        "folder",
+				GameName:    gameName,
+				Action:      "create",
+				IsDirectory: true,
+			}
+			results.DryRunResults = append(results.DryRunResults, result)
+			results.TotalFolders++
+			return nil
+		}
+
+		// Actually create the folder
+		return os.Mkdir(folderPath, os.ModePerm)
+	}
+	return nil
+}
+
+func applyTemplate(templateData map[string]string, useSafeNames bool, template string, folder bool) string {
 	result := strings.Replace(template, "{"+settings.TEMPLATE_TITLE_NAME+"}", templateData[settings.TEMPLATE_TITLE_NAME], 1)
 	result = strings.Replace(result, "{"+settings.TEMPLATE_TITLE_ID+"}", strings.ToUpper(templateData[settings.TEMPLATE_TITLE_ID]), 1)
 	result = strings.Replace(result, "{"+settings.TEMPLATE_VERSION+"}", templateData[settings.TEMPLATE_VERSION], 1)
@@ -314,13 +402,23 @@ func applyTemplate(templateData map[string]string, useSafeNames bool, template s
 	}
 
 	if useSafeNames {
-		result = nihongo.RomajiString(result)
-		safe := nonAscii.FindAllString(result, -1)
+		var safe []string
+		// Don't convert Korean to romaji, keep Korean characters
+		if folder {
+			safe = foldernonAscii.FindAllString(result, -1)
+		} else {
+			safe = filenonAscii.FindAllString(result, -1)
+		}
 		result = strings.Join(safe, "")
 	}
 	result = strings.ReplaceAll(result, "  ", " ")
 	result = strings.TrimSpace(result)
-	return folderIllegalCharsRegex.ReplaceAllString(result, "")
+	if folder {
+		result = folderIllegalCharsRegex.ReplaceAllString(result, "")
+	} else {
+		result = fileIllegalCharsRegex.ReplaceAllString(result, "")
+	}
+	return result
 }
 
 func deleteEmptyFolders(path string) error {

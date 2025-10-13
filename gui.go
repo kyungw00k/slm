@@ -12,6 +12,7 @@ import (
 	"github.com/giwty/switch-library-manager/settings"
 	"go.uber.org/zap"
 	"log"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -226,7 +227,9 @@ func (g *GUI) handleMessage(m *astilectron.EventMessage) interface{} {
 				name := ""
 				if v.File.Metadata.Ncap != nil {
 					version = v.File.Metadata.Ncap.DisplayVersion
-					name = v.File.Metadata.Ncap.TitleName["AmericanEnglish"].Title
+					// Use locale priority for title name extraction
+					settingsObj := settings.ReadSettings(g.baseFolder)
+					name = v.File.Metadata.Ncap.GetBestTitleName(settingsObj.LocalePriority)
 				}
 
 				if v.Updates != nil && len(v.Updates) != 0 {
@@ -374,28 +377,71 @@ func (g *GUI) loadSettings() string {
 
 func (g *GUI) buildSwitchDb() (*db.SwitchTitlesDB, error) {
 	settingsObj := settings.ReadSettings(g.baseFolder)
-	//1. load the titles JSON object
-	g.UpdateProgress(1, 4, "Downloading titles.json")
-	filename := filepath.Join(g.baseFolder, settings.TITLE_JSON_FILENAME)
-	titleFile, titlesEtag, err := db.LoadAndUpdateFile(settings.TITLES_JSON_URL, filename, settingsObj.TitlesEtag)
-	if err != nil {
-		return nil, errors.New("failed to download switch titles [reason:" + err.Error() + "]")
-	}
-	settingsObj.TitlesEtag = titlesEtag
 
-	g.UpdateProgress(2, 4, "Downloading versions.json")
-	filename = filepath.Join(g.baseFolder, settings.VERSIONS_JSON_FILENAME)
+	// Download versions.json first (shared across all languages)
+	g.UpdateProgress(1, 4, "Downloading versions.json")
+	filename := filepath.Join(g.baseFolder, settings.VERSIONS_JSON_FILENAME)
 	versionsFile, versionsEtag, err := db.LoadAndUpdateFile(settings.VERSIONS_JSON_URL, filename, settingsObj.VersionsEtag)
 	if err != nil {
 		return nil, errors.New("failed to download switch updates [reason:" + err.Error() + "]")
 	}
 	settingsObj.VersionsEtag = versionsEtag
 
+	// Download multiple language title files
+	titleFiles := make(map[string]*os.File)
+	totalSteps := 2 + len(settingsObj.LocalePriority) + 1
+	step := 2
+
+	for _, locale := range settingsObj.LocalePriority {
+		if url, exists := settingsObj.TitleDBUrls[locale]; exists {
+			g.UpdateProgress(step, totalSteps, "Downloading "+locale+" titles...")
+			filename = filepath.Join(g.baseFolder, locale+".json")
+
+			etag := ""
+			if settingsObj.TitlesETags != nil {
+				etag = settingsObj.TitlesETags[locale]
+			}
+
+			titleFile, newEtag, err := db.LoadAndUpdateFile(url, filename, etag)
+			if err != nil {
+				// Log error but continue with other languages
+				zap.S().Warnf("Failed to download %s titles: %v", locale, err)
+			} else {
+				titleFiles[locale] = titleFile
+				if settingsObj.TitlesETags == nil {
+					settingsObj.TitlesETags = make(map[string]string)
+				}
+				settingsObj.TitlesETags[locale] = newEtag
+			}
+		}
+		step++
+	}
+
+	// If no title files were downloaded, return error
+	if len(titleFiles) == 0 {
+		return nil, errors.New("no title files could be downloaded")
+	}
+
 	settings.SaveSettings(settingsObj, g.baseFolder)
 
-	g.UpdateProgress(3, 4, "Processing switch titles and updates ...")
-	switchTitleDB, err := db.CreateSwitchTitleDB(titleFile, versionsFile)
-	g.UpdateProgress(4, 4, "Finishing up...")
+	g.UpdateProgress(totalSteps-1, totalSteps, "Processing switch titles and updates ...")
+
+	// Use title file according to locale priority
+	var primaryTitleFile *os.File
+	for _, locale := range settingsObj.LocalePriority {
+		if titleFile, exists := titleFiles[locale]; exists {
+			primaryTitleFile = titleFile
+			zap.S().Infof("Using %s titledb as primary source", locale)
+			break
+		}
+	}
+
+	if primaryTitleFile == nil {
+		return nil, errors.New("no title files could be downloaded")
+	}
+
+	switchTitleDB, err := db.CreateSwitchTitleDB(primaryTitleFile, versionsFile)
+	g.UpdateProgress(totalSteps, totalSteps, "Finishing up...")
 	return switchTitleDB, err
 }
 
@@ -418,7 +464,15 @@ func (g *GUI) organizeLibrary() {
 		g.state.window.SendMessage(Message{Name: "error", Payload: "the organize options in settings.json are not valid, please check that the template contains file/folder name"}, func(m *astilectron.EventMessage) {})
 		return
 	}
-	process.OrganizeByFolders(folderToScan, g.state.localDB, g.state.switchDB, g)
+	results := process.OrganizeByFolders(folderToScan, g.state.localDB, g.state.switchDB, g)
+
+	// If dry run mode, send results to frontend
+	if results != nil && settings.ReadSettings(g.baseFolder).OrganizeOptions.DryRun {
+		resultsJson, _ := json.Marshal(results)
+		g.state.window.SendMessage(Message{Name: "dryRunResults", Payload: string(resultsJson)}, func(m *astilectron.EventMessage) {})
+		return
+	}
+
 	if settings.ReadSettings(g.baseFolder).OrganizeOptions.DeleteOldUpdateFiles {
 		process.DeleteOldUpdates(g.baseFolder, g.state.localDB, g)
 	}

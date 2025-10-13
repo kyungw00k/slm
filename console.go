@@ -40,20 +40,11 @@ func (c *Console) Start() {
 
 	settingsObj := settings.ReadSettings(c.baseFolder)
 
-	//1. load the titles JSON object
-	fmt.Printf("Downlading latest switch titles json file")
-	progressBar = progressbar.New(2)
+	// Download versions.json first (shared across all languages)
+	fmt.Printf("Downloading versions.json and multiple language title files\n")
+	progressBar = progressbar.New(1 + len(settingsObj.LocalePriority))
 
-	filename := filepath.Join(c.baseFolder, settings.TITLE_JSON_FILENAME)
-	titleFile, titlesEtag, err := db.LoadAndUpdateFile(settings.TITLES_JSON_URL, filename, settingsObj.TitlesEtag)
-	if err != nil {
-		fmt.Printf("title json file doesn't exist\n")
-		return
-	}
-	settingsObj.TitlesEtag = titlesEtag
-	progressBar.Add(1)
-	//2. load the versions JSON object
-	filename = filepath.Join(c.baseFolder, settings.VERSIONS_JSON_FILENAME)
+	filename := filepath.Join(c.baseFolder, settings.VERSIONS_JSON_FILENAME)
 	versionsFile, versionsEtag, err := db.LoadAndUpdateFile(settings.VERSIONS_JSON_URL, filename, settingsObj.VersionsEtag)
 	if err != nil {
 		fmt.Printf("version json file doesn't exist\n")
@@ -61,6 +52,39 @@ func (c *Console) Start() {
 	}
 	settingsObj.VersionsEtag = versionsEtag
 	progressBar.Add(1)
+
+	// Download multiple language title files
+	titleFiles := make(map[string]*os.File)
+	for _, locale := range settingsObj.LocalePriority {
+		if url, exists := settingsObj.TitleDBUrls[locale]; exists {
+			filename = filepath.Join(c.baseFolder, locale+".json")
+
+			etag := ""
+			if settingsObj.TitlesETags != nil {
+				etag = settingsObj.TitlesETags[locale]
+			}
+
+			titleFile, newEtag, err := db.LoadAndUpdateFile(url, filename, etag)
+			if err != nil {
+				fmt.Printf("Warning: Failed to download %s titles: %v\n", locale, err)
+			} else {
+				titleFiles[locale] = titleFile
+				if settingsObj.TitlesETags == nil {
+					settingsObj.TitlesETags = make(map[string]string)
+				}
+				settingsObj.TitlesETags[locale] = newEtag
+				fmt.Printf("Downloaded %s titles\n", locale)
+			}
+		}
+		progressBar.Add(1)
+	}
+
+	// If no title files were downloaded, exit with error
+	if len(titleFiles) == 0 {
+		fmt.Printf("No title files could be downloaded\n")
+		return
+	}
+
 	progressBar.Finish()
 	newUpdate, err := settings.CheckForUpdates()
 
@@ -72,7 +96,22 @@ func (c *Console) Start() {
 	settings.SaveSettings(settingsObj, c.baseFolder)
 
 	//4. create switch title db
-	titlesDB, err := db.CreateSwitchTitleDB(titleFile, versionsFile)
+	// Use title file according to locale priority
+	var primaryTitleFile *os.File
+	for _, locale := range settingsObj.LocalePriority {
+		if titleFile, exists := titleFiles[locale]; exists {
+			primaryTitleFile = titleFile
+			fmt.Printf("Using %s titledb as primary source\n", locale)
+			break
+		}
+	}
+
+	if primaryTitleFile == nil {
+		fmt.Printf("No title files could be downloaded\n")
+		return
+	}
+
+	titlesDB, err := db.CreateSwitchTitleDB(primaryTitleFile, versionsFile)
 
 	//5. read local files
 	folderToScan := settingsObj.Folder
@@ -96,15 +135,15 @@ func (c *Console) Start() {
 		recursiveMode = *recursive
 	}
 
-	localDbManager, err := db.NewLocalSwitchDBManager(c.baseFolder)
+	scanFolders := settingsObj.ScanFolders
+	scanFolders = append(scanFolders, folderToScan)
+
+	localDbManager, err := db.NewLocalSwitchDBManagerWithScanPaths(c.baseFolder, scanFolders)
 	if err != nil {
 		fmt.Printf("failed to create local files db :%v\n", err)
 		return
 	}
 	defer localDbManager.Close()
-
-	scanFolders := settingsObj.ScanFolders
-	scanFolders = append(scanFolders, folderToScan)
 
 	localDB, err := localDbManager.CreateLocalSwitchFilesDB(scanFolders, c, recursiveMode, true)
 	if err != nil {
@@ -129,7 +168,14 @@ func (c *Console) Start() {
 	if settingsObj.OrganizeOptions.RenameFiles || settingsObj.OrganizeOptions.CreateFolderPerGame {
 		progressBar = progressbar.New(2000)
 		fmt.Printf("\nStarting library organization\n")
-		process.OrganizeByFolders(folderToScan, localDB, titlesDB, c)
+		results := process.OrganizeByFolders(folderToScan, localDB, titlesDB, c)
+
+		// If dry run mode, show results
+		if results != nil && settingsObj.OrganizeOptions.DryRun {
+			c.displayDryRunResults(results)
+			return
+		}
+
 		progressBar.Finish()
 	}
 
@@ -216,4 +262,49 @@ func (c *Console) UpdateProgress(curr int, total int, message string) {
 	progressBar.ChangeMax(total)
 	progressBar.Set(curr)
 
+}
+
+func (c *Console) displayDryRunResults(results *process.OrganizeResults) {
+	fmt.Printf("\n🔍 DRY RUN MODE - No files will be moved\n")
+	fmt.Printf("==================================================\n\n")
+
+	if len(results.DryRunResults) == 0 {
+		fmt.Printf("✅ No changes needed - all files are already organized correctly!\n\n")
+		return
+	}
+
+	fmt.Printf("📊 Summary: %d files, %d folders would be affected\n\n", results.TotalFiles, results.TotalFolders)
+
+	// Group results by game
+	gameResults := make(map[string][]process.DryRunResult)
+	for _, result := range results.DryRunResults {
+		if _, exists := gameResults[result.GameName]; !exists {
+			gameResults[result.GameName] = []process.DryRunResult{}
+		}
+		gameResults[result.GameName] = append(gameResults[result.GameName], result)
+	}
+
+	// Display results by game
+	for gameName, gameFiles := range gameResults {
+		fmt.Printf("🎮 %s\n", gameName)
+		fmt.Printf("   ────────────────────────────────────────\n")
+
+		for _, result := range gameFiles {
+			switch result.Action {
+			case "create":
+				fmt.Printf("   📁 CREATE: %s\n", result.To)
+			case "move":
+				fromName := filepath.Base(result.From)
+				toName := filepath.Base(result.To)
+				if fromName != toName {
+					fmt.Printf("   📄 RENAME: %s → %s\n", fromName, toName)
+				} else {
+					fmt.Printf("   📂 MOVE:   %s → %s\n", filepath.Dir(result.From), filepath.Dir(result.To))
+				}
+			}
+		}
+		fmt.Printf("\n")
+	}
+
+	fmt.Printf("💡 To apply these changes, set \"dry_run\": false in organize_options\n\n")
 }

@@ -3,12 +3,13 @@ package settings
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/mcuadros/go-version"
-	"go.uber.org/zap"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
+
+	"github.com/mcuadros/go-version"
+	"go.uber.org/zap"
 )
 
 var (
@@ -20,9 +21,9 @@ const (
 	TITLE_JSON_FILENAME    = "titles.json"
 	VERSIONS_JSON_FILENAME = "versions.json"
 	SLM_VERSION            = "1.4.0"
-	TITLES_JSON_URL        = "https://tinfoil.media/repo/db/titles.json"
+	TITLES_JSON_URL        = "https://raw.githubusercontent.com/blawar/titledb/master/KR.ko.json"
 	//TITLES_JSON_URL    = "https://raw.githubusercontent.com/blawar/titledb/master/titles.US.en.json"
-	VERSIONS_JSON_URL = "https://tinfoil.media/repo/db/versions.json"
+	VERSIONS_JSON_URL = "https://raw.githubusercontent.com/blawar/titledb/master/versions.json"
 	//VERSIONS_JSON_URL = "https://raw.githubusercontent.com/blawar/titledb/master/versions.json"
 	SLM_VERSION_URL = "https://raw.githubusercontent.com/giwty/switch-library-manager/master/slm.json"
 )
@@ -45,22 +46,25 @@ type OrganizeOptions struct {
 	FolderNameTemplate   string `json:"folder_name_template"`
 	SwitchSafeFileNames  bool   `json:"switch_safe_file_names"`
 	FileNameTemplate     string `json:"file_name_template"`
+	DryRun               bool   `json:"dry_run"`
 }
 
 type AppSettings struct {
-	VersionsEtag           string          `json:"versions_etag"`
-	TitlesEtag             string          `json:"titles_etag"`
-	Prodkeys               string          `json:"prod_keys"`
-	Folder                 string          `json:"folder"`
-	ScanFolders            []string        `json:"scan_folders"`
-	GUI                    bool            `json:"gui"`
-	Debug                  bool            `json:"debug"`
-	CheckForMissingUpdates bool            `json:"check_for_missing_updates"`
-	CheckForMissingDLC     bool            `json:"check_for_missing_dlc"`
-	OrganizeOptions        OrganizeOptions `json:"organize_options"`
-	ScanRecursively        bool            `json:"scan_recursively"`
-	GuiPagingSize          int             `json:"gui_page_size"`
-	IgnoreDLCTitleIds      []string        `json:"ignore_dlc_title_ids"`
+	VersionsEtag           string            `json:"versions_etag"`
+	Prodkeys               string            `json:"prod_keys"`
+	Folder                 string            `json:"folder"`
+	ScanFolders            []string          `json:"scan_folders"`
+	GUI                    bool              `json:"gui"`
+	Debug                  bool              `json:"debug"`
+	CheckForMissingUpdates bool              `json:"check_for_missing_updates"`
+	CheckForMissingDLC     bool              `json:"check_for_missing_dlc"`
+	OrganizeOptions        OrganizeOptions   `json:"organize_options"`
+	ScanRecursively        bool              `json:"scan_recursively"`
+	GuiPagingSize          int               `json:"gui_page_size"`
+	IgnoreDLCTitleIds      []string          `json:"ignore_dlc_title_ids"`
+	LocalePriority         []string          `json:"locale_priority"`
+	TitleDBUrls            map[string]string `json:"titledb_urls"`
+	TitlesETags            map[string]string `json:"titles_etags"`
 }
 
 func ReadSettingsAsJSON(baseFolder string) string {
@@ -77,7 +81,18 @@ func ReadSettings(baseFolder string) *AppSettings {
 		return settingsInstance
 	}
 	settingsInstance = &AppSettings{Debug: false, GuiPagingSize: 100, ScanFolders: []string{},
-		OrganizeOptions: OrganizeOptions{SwitchSafeFileNames: true}, Prodkeys: "", IgnoreDLCTitleIds: []string{"01007F600B135007"}}
+		OrganizeOptions: OrganizeOptions{SwitchSafeFileNames: true}, Prodkeys: "", IgnoreDLCTitleIds: []string{"01007F600B135007"},
+		LocalePriority: []string{"KR.ko", "JP.ja", "US.en"},
+		TitleDBUrls: map[string]string{
+			"KR.ko": "https://raw.githubusercontent.com/blawar/titledb/master/KR.ko.json",
+			"US.en": "https://raw.githubusercontent.com/blawar/titledb/master/US.en.json",
+			"JP.ja": "https://raw.githubusercontent.com/blawar/titledb/master/JP.ja.json",
+		},
+		TitlesETags: map[string]string{
+			"KR.ko": "",
+			"US.en": "",
+			"JP.ja": "",
+		}}
 	if _, err := os.Stat(filepath.Join(baseFolder, SETTINGS_FILENAME)); err == nil {
 		file, err := os.Open(filepath.Join(baseFolder, SETTINGS_FILENAME))
 		if err != nil {
@@ -94,7 +109,6 @@ func ReadSettings(baseFolder string) *AppSettings {
 
 func saveDefaultSettings(baseFolder string) *AppSettings {
 	settingsInstance = &AppSettings{
-		TitlesEtag:             "W/\"a5b02845cf6bd61:0\"",
 		VersionsEtag:           "W/\"2ef50d1cb6bd61:0\"",
 		Folder:                 "",
 		ScanFolders:            []string{},
@@ -104,7 +118,18 @@ func saveDefaultSettings(baseFolder string) *AppSettings {
 		CheckForMissingUpdates: true,
 		CheckForMissingDLC:     true,
 		ScanRecursively:        true,
-		Debug:                  false,
+		Debug:          false,
+		LocalePriority: []string{"KR.ko", "JP.ja", "US.en"},
+		TitleDBUrls: map[string]string{
+			"KR.ko": "https://raw.githubusercontent.com/blawar/titledb/master/KR.ko.json",
+			"US.en": "https://raw.githubusercontent.com/blawar/titledb/master/US.en.json",
+			"JP.ja": "https://raw.githubusercontent.com/blawar/titledb/master/JP.ja.json",
+		},
+		TitlesETags: map[string]string{
+			"KR.ko": "",
+			"US.en": "",
+			"JP.ja": "",
+		},
 		OrganizeOptions: OrganizeOptions{
 			RenameFiles:         false,
 			CreateFolderPerGame: false,
@@ -114,6 +139,7 @@ func saveDefaultSettings(baseFolder string) *AppSettings {
 			DeleteEmptyFolders:   false,
 			SwitchSafeFileNames:  true,
 			DeleteOldUpdateFiles: false,
+			DryRun:               false,
 		},
 	}
 	return SaveSettings(settingsInstance, baseFolder)
@@ -124,6 +150,26 @@ func SaveSettings(settings *AppSettings, baseFolder string) *AppSettings {
 	_ = ioutil.WriteFile(filepath.Join(baseFolder, SETTINGS_FILENAME), file, 0644)
 	settingsInstance = settings
 	return settings
+}
+
+// GetLanguageMapping maps locale codes to NACP language names
+func GetLanguageMapping() map[string]string {
+	return map[string]string{
+		"KR.ko": "Korean",
+		"US.en": "AmericanEnglish",
+		"GB.en": "BritishEnglish",
+		"JP.ja": "Japanese",
+		"FR.fr": "French",
+		"DE.de": "German",
+		"ES.es": "Spanish",
+		"IT.it": "Italian",
+		"NL.nl": "Dutch",
+		"CA.fr": "CanadianFrench",
+		"PT.pt": "Portuguese",
+		"RU.ru": "Russian",
+		"TW.zh": "Taiwanese",
+		"CN.zh": "Chinese",
+	}
 }
 
 func CheckForUpdates() (bool, error) {

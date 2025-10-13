@@ -200,3 +200,51 @@ func readBytesUntilZero(appTitleBytes []byte) []byte {
 	}
 	return nameBytes
 }
+
+// GetBestTitleName returns the best available title name based on locale priority
+func (n *Nacp) GetBestTitleName(localePriority []string) string {
+	if n == nil || n.TitleName == nil {
+		return ""
+	}
+
+	// Create locale to language mapping
+	localeToLanguage := map[string]string{
+		"KR.ko": "Korean",
+		"US.en": "AmericanEnglish",
+		"GB.en": "BritishEnglish",
+		"JP.ja": "Japanese",
+		"FR.fr": "French",
+		"DE.de": "German",
+		"ES.es": "Spanish",
+		"IT.it": "Italian",
+		"NL.nl": "Dutch",
+		"CA.fr": "CanadianFrench",
+		"PT.pt": "Portuguese",
+		"RU.ru": "Russian",
+		"TW.zh": "Taiwanese",
+		"CN.zh": "Chinese",
+	}
+
+	// Try each locale in order of priority
+	for _, locale := range localePriority {
+		if lang, exists := localeToLanguage[locale]; exists {
+			if title, exists := n.TitleName[lang]; exists && title.Title != "" {
+				return title.Title
+			}
+		}
+	}
+
+	// Fallback: try AmericanEnglish if not in priority list
+	if title, exists := n.TitleName["AmericanEnglish"]; exists && title.Title != "" {
+		return title.Title
+	}
+
+	// Last resort: return first non-empty title
+	for _, title := range n.TitleName {
+		if title.Title != "" {
+			return title.Title
+		}
+	}
+
+	return ""
+}

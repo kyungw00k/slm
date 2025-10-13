@@ -3,15 +3,16 @@ package db
 import (
 	"errors"
 	"fmt"
-	"github.com/giwty/switch-library-manager/fileio"
-	"github.com/giwty/switch-library-manager/settings"
-	"github.com/giwty/switch-library-manager/switchfs"
-	"go.uber.org/zap"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/giwty/switch-library-manager/fileio"
+	"github.com/giwty/switch-library-manager/settings"
+	"github.com/giwty/switch-library-manager/switchfs"
+	"go.uber.org/zap"
 )
 
 var (
@@ -36,6 +37,14 @@ type LocalSwitchDBManager struct {
 
 func NewLocalSwitchDBManager(baseFolder string) (*LocalSwitchDBManager, error) {
 	db, err := NewPersistentDB(baseFolder)
+	if err != nil {
+		return nil, err
+	}
+	return &LocalSwitchDBManager{db: db}, nil
+}
+
+func NewLocalSwitchDBManagerWithScanPaths(baseFolder string, scanPaths []string) (*LocalSwitchDBManager, error) {
+	db, err := NewPersistentDBWithScanPaths(baseFolder, scanPaths)
 	if err != nil {
 		return nil, err
 	}
