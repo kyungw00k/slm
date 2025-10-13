@@ -3,8 +3,9 @@ package switchfs
 import (
 	"bytes"
 	"errors"
-	"go.uber.org/zap"
 	"strings"
+
+	"go.uber.org/zap"
 )
 
 func ReadNspMetadata(filePath string) (map[string]*ContentMetaAttributes, error) {
@@ -43,7 +44,7 @@ func ReadNspMetadata(filePath string) (map[string]*ContentMetaAttributes, error)
 			if currCnmt.Type != "DLC" {
 				nacp, err := ExtractNacp(currCnmt, file, pfs0, 0)
 				if err != nil {
-					zap.S().Debug("Failed to extract nacp [%v]\n", err.Error())
+					zap.S().Debug("Failed to extract nacp [%v] from [%v]\n", err.Error(), filePath)
 				}
 				currCnmt.Ncap = nacp
 			}
