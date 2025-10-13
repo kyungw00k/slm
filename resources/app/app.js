@@ -97,6 +97,10 @@ $(function () {
                 state.dlc = undefined;
                 scanLocalFolder(true)
             }
+            else if (message.name === "dryRunResults") {
+                $(".progress-container").hide();
+                displayDryRunResults(JSON.parse(message.payload));
+            }
         });
 
         let openFolderPicker = function (mode) {
@@ -416,6 +420,70 @@ $(function () {
                 var allArguments = args.concat(Array.prototype.slice.call(arguments));
                 return func.apply(this, allArguments);
             };
+        }
+
+        function displayDryRunResults(results) {
+            // Switch to organize tab to show results
+            loadTab("#organize");
+
+            let html = '<div class="dry-run-results">';
+            html += '<div class="alert alert-info" role="alert">';
+            html += '<h4>🔍 DRY RUN MODE - Preview of Changes</h4>';
+            html += '<p>No files will be moved. This shows what would happen when you organize your library.</p>';
+            html += '</div>';
+
+            if (results.dry_run_results.length === 0) {
+                html += '<div class="alert alert-success" role="alert">';
+                html += '✅ No changes needed - all files are already organized correctly!';
+                html += '</div>';
+            } else {
+                html += '<div class="alert alert-warning" role="alert">';
+                html += `📊 Summary: ${results.total_files} files and ${results.total_folders} folders would be affected`;
+                html += '</div>';
+
+                // Group results by game
+                let gameResults = {};
+                results.dry_run_results.forEach(result => {
+                    if (!gameResults[result.game_name]) {
+                        gameResults[result.game_name] = [];
+                    }
+                    gameResults[result.game_name].push(result);
+                });
+
+                // Display results by game
+                html += '<div class="card-deck">';
+                Object.keys(gameResults).forEach(gameName => {
+                    html += '<div class="card mb-3">';
+                    html += `<div class="card-header"><strong>🎮 ${gameName}</strong></div>`;
+                    html += '<div class="card-body">';
+
+                    gameResults[gameName].forEach(result => {
+                        if (result.action === 'create') {
+                            html += `<div class="text-primary">📁 CREATE: ${result.to}</div>`;
+                        } else if (result.action === 'move') {
+                            let fromName = result.from.split('/').pop();
+                            let toName = result.to.split('/').pop();
+                            if (fromName !== toName) {
+                                html += `<div class="text-warning">📄 RENAME: ${fromName} → ${toName}</div>`;
+                            } else {
+                                html += `<div class="text-info">📂 MOVE: ${result.from} → ${result.to}</div>`;
+                            }
+                        }
+                    });
+
+                    html += '</div></div>';
+                });
+                html += '</div>';
+
+                html += '<div class="alert alert-light" role="alert">';
+                html += '💡 To apply these changes, set "dry_run": false in organize_options and run organize again.';
+                html += '</div>';
+            }
+
+            html += '</div>';
+
+            // Replace organize tab content with dry run results
+            $("#organize").html(html);
         }
     })
 
