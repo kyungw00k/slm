@@ -56,15 +56,15 @@ func (c *Console) Start() {
 	// Download multiple language title files
 	titleFiles := make(map[string]*os.File)
 	for _, locale := range settingsObj.LocalePriority {
-		if url, exists := settingsObj.TitleDBUrls[locale]; exists {
-			filename = filepath.Join(c.baseFolder, locale+".json")
+		url := settingsObj.GetTitleDBURL(locale)
+		filename = filepath.Join(c.baseFolder, locale+".json")
 
-			etag := ""
-			if settingsObj.TitlesETags != nil {
-				etag = settingsObj.TitlesETags[locale]
-			}
+		etag := ""
+		if settingsObj.TitlesETags != nil {
+			etag = settingsObj.TitlesETags[locale]
+		}
 
-			titleFile, newEtag, err := db.LoadAndUpdateFile(url, filename, etag)
+		titleFile, newEtag, err := db.LoadAndUpdateFile(url, filename, etag)
 			if err != nil {
 				fmt.Printf("Warning: Failed to download %s titles: %v\n", locale, err)
 			} else {

@@ -393,16 +393,16 @@ func (g *GUI) buildSwitchDb() (*db.SwitchTitlesDB, error) {
 	step := 2
 
 	for _, locale := range settingsObj.LocalePriority {
-		if url, exists := settingsObj.TitleDBUrls[locale]; exists {
-			g.UpdateProgress(step, totalSteps, "Downloading "+locale+" titles...")
-			filename = filepath.Join(g.baseFolder, locale+".json")
+		url := settingsObj.GetTitleDBURL(locale)
+		g.UpdateProgress(step, totalSteps, "Downloading "+locale+" titles...")
+		filename = filepath.Join(g.baseFolder, locale+".json")
 
-			etag := ""
-			if settingsObj.TitlesETags != nil {
-				etag = settingsObj.TitlesETags[locale]
-			}
+		etag := ""
+		if settingsObj.TitlesETags != nil {
+			etag = settingsObj.TitlesETags[locale]
+		}
 
-			titleFile, newEtag, err := db.LoadAndUpdateFile(url, filename, etag)
+		titleFile, newEtag, err := db.LoadAndUpdateFile(url, filename, etag)
 			if err != nil {
 				// Log error but continue with other languages
 				zap.S().Warnf("Failed to download %s titles: %v", locale, err)

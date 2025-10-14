@@ -83,11 +83,7 @@ func ReadSettings(baseFolder string) *AppSettings {
 	settingsInstance = &AppSettings{Debug: false, GuiPagingSize: 100, ScanFolders: []string{},
 		OrganizeOptions: OrganizeOptions{SwitchSafeFileNames: true}, Prodkeys: "", IgnoreDLCTitleIds: []string{"01007F600B135007"},
 		LocalePriority: []string{"KR.ko", "JP.ja", "US.en"},
-		TitleDBUrls: map[string]string{
-			"KR.ko": "https://raw.githubusercontent.com/blawar/titledb/master/KR.ko.json",
-			"US.en": "https://raw.githubusercontent.com/blawar/titledb/master/US.en.json",
-			"JP.ja": "https://raw.githubusercontent.com/blawar/titledb/master/JP.ja.json",
-		},
+		TitleDBUrls:    map[string]string{},
 		TitlesETags: map[string]string{
 			"KR.ko": "",
 			"US.en": "",
@@ -120,11 +116,7 @@ func saveDefaultSettings(baseFolder string) *AppSettings {
 		ScanRecursively:        true,
 		Debug:          false,
 		LocalePriority: []string{"KR.ko", "JP.ja", "US.en"},
-		TitleDBUrls: map[string]string{
-			"KR.ko": "https://raw.githubusercontent.com/blawar/titledb/master/KR.ko.json",
-			"US.en": "https://raw.githubusercontent.com/blawar/titledb/master/US.en.json",
-			"JP.ja": "https://raw.githubusercontent.com/blawar/titledb/master/JP.ja.json",
-		},
+		TitleDBUrls:    map[string]string{},
 		TitlesETags: map[string]string{
 			"KR.ko": "",
 			"US.en": "",
@@ -150,6 +142,17 @@ func SaveSettings(settings *AppSettings, baseFolder string) *AppSettings {
 	_ = ioutil.WriteFile(filepath.Join(baseFolder, SETTINGS_FILENAME), file, 0644)
 	settingsInstance = settings
 	return settings
+}
+
+// GetTitleDBURL returns the URL for a given locale, using default pattern if not specified in settings
+func (s *AppSettings) GetTitleDBURL(locale string) string {
+	if s.TitleDBUrls != nil {
+		if url, exists := s.TitleDBUrls[locale]; exists {
+			return url
+		}
+	}
+	// Default pattern: https://raw.githubusercontent.com/blawar/titledb/master/<locale>.json
+	return fmt.Sprintf("https://raw.githubusercontent.com/blawar/titledb/master/%s.json", locale)
 }
 
 // GetLanguageMapping maps locale codes to NACP language names

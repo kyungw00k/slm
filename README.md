@@ -9,10 +9,13 @@ Easily manage your switch game backups
 
 #### Features:
 - Cross platform, works on Windows / Mac / Linux
-- GUI and command line interfaces 
+- GUI and command line interfaces
 - Scan your local switch backup library (NSP/NSZ/XCI)
 - Read titleId/version by decrypting NSP/XCI/NSZ (requires prod.keys)
 - If no prod.keys present, fallback to read titleId/version by parsing file name  (example: `Super Mario Odyssey [0100000000010000][v0].nsp`).
+- **Multi-language titledb support** with locale priority (Korean → Japanese → English)
+- **Korean filename support** with proper Hangul character preservation
+- **Concurrent execution support** with scan-path-based database separation
 - Lists missing update files (for games and DLC)
 - Lists missing DLCs
 - Automatically organize games per folder
@@ -36,7 +39,11 @@ You can customize the folder/file re-naming, as well as turn on/off features.
 ```
 {
  "versions_etag": "W/\"c3f5ecb3392d61:0\"",
- "titles_etag": "W/\"4a4fcc163a92d61:0\"",
+ "titles_etags": {
+  "KR.ko": "",
+  "US.en": "",
+  "JP.ja": ""
+ },
  "prod_keys": "",
  "folder": "",
  "scan_folders": [],
@@ -51,12 +58,34 @@ You can customize the folder/file re-naming, as well as turn on/off features.
   "delete_old_update_files": false,
   "folder_name_template": "{TITLE_NAME}",
   "switch_safe_file_names": true,
-  "file_name_template": "{TITLE_NAME} ({DLC_NAME})[{TITLE_ID}][v{VERSION}]"
+  "file_name_template": "{TITLE_NAME} ({DLC_NAME})[{TITLE_ID}][v{VERSION}]",
+  "dry_run": false
  },
  "scan_recursively": true,
- "gui_page_size": 100
+ "gui_page_size": 100,
+ "locale_priority": ["KR.ko", "JP.ja", "US.en"],
+ "titledb_urls": {},
+ "ignore_dlc_title_ids": ["01007F600B135007"]
 }
 ```
+
+### New Configuration Options
+
+- **locale_priority**: Array of locale codes in priority order for title name resolution. Default: `["KR.ko", "JP.ja", "US.en"]`
+- **titledb_urls**: Optional custom URLs for different language title databases. If not specified, uses default pattern: `https://raw.githubusercontent.com/blawar/titledb/master/<locale>.json`
+- **titles_etags**: ETags for each language title database to optimize downloads
+- **ignore_dlc_title_ids**: Array of DLC title IDs to ignore during processing
+- **dry_run** (in organize_options): When set to `true`, shows what changes would be made without actually moving/renaming files
+
+### Dry Run Mode
+
+Enable dry run mode by setting `"dry_run": true` in the `organize_options` section. This allows you to preview what the organize operation would do without making actual changes to your files. The tool will display:
+
+- Which files would be moved and where
+- Which folders would be created
+- Which files would be renamed
+
+This is useful for testing your organization settings before applying them to your library.
 
 ## Naming template
 The following template elements are supported:
