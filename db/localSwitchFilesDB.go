@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/giwty/switch-library-manager/fileio"
 	"github.com/giwty/switch-library-manager/settings"
@@ -89,8 +91,28 @@ type LocalSwitchFilesDB struct {
 	NumFiles  int
 }
 
+// FileJob represents a file to be processed by a worker
+type FileJob struct {
+	File  ExtendedFileInfo
+	Index int
+}
+
+// FileResult represents the result of processing a file
+type FileResult struct {
+	Index        int
+	File         ExtendedFileInfo
+	ContentMap   map[string]*switchfs.ContentMetaAttributes
+	Error        error
+	Skipped      *SkippedFile
+}
+
 func (ldb *LocalSwitchDBManager) CreateLocalSwitchFilesDB(folders []string,
-	progress ProgressUpdater, recursive bool, ignoreCache bool) (*LocalSwitchFilesDB, error) {
+	progress ProgressUpdater, recursive bool, ignoreCache bool, numWorkers int) (*LocalSwitchFilesDB, error) {
+
+	// Default to number of CPUs if not specified
+	if numWorkers <= 0 {
+		numWorkers = runtime.NumCPU()
+	}
 
 	titles := map[string]*SwitchGameFiles{}
 	skipped := map[ExtendedFileInfo]SkippedFile{}
@@ -114,7 +136,7 @@ func (ldb *LocalSwitchDBManager) CreateLocalSwitchFilesDB(folders []string,
 			}
 		}
 
-		ldb.processLocalFiles(files, progress, titles, skipped)
+		ldb.processLocalFilesWithWorkers(files, progress, titles, skipped, numWorkers)
 
 		ldb.db.AddEntry(DB_TABLE_LOCAL_LIBRARY, "files", files)
 		ldb.db.AddEntry(DB_TABLE_LOCAL_LIBRARY, "skipped", skipped)
@@ -285,6 +307,238 @@ func (ldb *LocalSwitchDBManager) processLocalFiles(files []ExtendedFileInfo,
 		}
 	}
 
+}
+
+// processLocalFilesWithWorkers processes files in parallel using a worker pool
+func (ldb *LocalSwitchDBManager) processLocalFilesWithWorkers(
+	files []ExtendedFileInfo,
+	progress ProgressUpdater,
+	titles map[string]*SwitchGameFiles,
+	skipped map[ExtendedFileInfo]SkippedFile,
+	numWorkers int) {
+
+	total := len(files)
+	if total == 0 {
+		return
+	}
+
+	// Create channels
+	jobs := make(chan FileJob, numWorkers*2)
+	results := make(chan FileResult, numWorkers*2)
+
+	// Start workers
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go ldb.fileWorker(w, jobs, results, &wg)
+	}
+
+	// Start result collector
+	done := make(chan bool)
+	processedCount := 0
+	go func() {
+		for result := range results {
+			processedCount++
+			
+			// Update progress
+			if progress != nil {
+				progress.UpdateProgress(processedCount, total, "process:"+result.File.FileName)
+			}
+
+			// Handle skipped file
+			if result.Skipped != nil {
+				skipped[result.File] = *result.Skipped
+				continue
+			}
+
+			// Handle error
+			if result.Error != nil {
+				if _, ok := skipped[result.File]; !ok {
+					skipped[result.File] = SkippedFile{
+						ReasonText: "unable to determine title-Id / version - " + result.Error.Error(),
+						ReasonCode: REASON_UNRECOGNISED,
+					}
+				}
+				continue
+			}
+
+			// Process content metadata
+			if result.ContentMap != nil {
+				ldb.processContentMetadata(result.File, result.ContentMap, titles, skipped)
+			}
+		}
+		done <- true
+	}()
+
+	// Send jobs
+	for i, file := range files {
+		jobs <- FileJob{File: file, Index: i}
+	}
+	close(jobs)
+
+	// Wait for workers
+	wg.Wait()
+	close(results)
+
+	// Wait for collector
+	<-done
+}
+
+// fileWorker processes files from the job queue
+func (ldb *LocalSwitchDBManager) fileWorker(id int, jobs <-chan FileJob, results chan<- FileResult, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	for job := range jobs {
+		result := FileResult{
+			Index: job.Index,
+			File:  job.File,
+		}
+
+		file := job.File
+		filePath := filepath.Join(file.BaseFolder, file.FileName)
+
+		// Skip directories
+		if file.IsDir {
+			continue
+		}
+
+		fileName := strings.ToLower(file.FileName)
+		isSplit := false
+
+		// Check for split files
+		if partNum, err := strconv.Atoi(fileName[len(fileName)-2:]); err == nil {
+			if partNum == 0 {
+				isSplit = true
+			} else {
+				continue
+			}
+		}
+
+		// Only handle NSZ, NSP, XCI, XCZ files
+		if !isSplit &&
+			!strings.HasSuffix(fileName, "xci") &&
+			!strings.HasSuffix(fileName, "nsp") &&
+			!strings.HasSuffix(fileName, "nsz") &&
+			!strings.HasSuffix(fileName, "xcz") {
+			result.Skipped = &SkippedFile{
+				ReasonCode: REASON_UNSUPPORTED_TYPE,
+				ReasonText: "file type is not supported",
+			}
+			results <- result
+			continue
+		}
+
+		// Get metadata (this is the I/O intensive part)
+		tempSkipped := make(map[ExtendedFileInfo]SkippedFile)
+		contentMap, err := ldb.getGameMetadata(file, filePath, tempSkipped)
+
+		if err != nil {
+			if skippedInfo, ok := tempSkipped[file]; ok {
+				result.Skipped = &skippedInfo
+			} else {
+				result.Error = err
+			}
+			results <- result
+			continue
+		}
+
+		result.ContentMap = contentMap
+		results <- result
+	}
+}
+
+// processContentMetadata processes the content metadata and updates titles/skipped maps
+func (ldb *LocalSwitchDBManager) processContentMetadata(
+	file ExtendedFileInfo,
+	contentMap map[string]*switchfs.ContentMetaAttributes,
+	titles map[string]*SwitchGameFiles,
+	skipped map[ExtendedFileInfo]SkippedFile) {
+
+	for _, metadata := range contentMap {
+		idPrefix := metadata.TitleId[0 : len(metadata.TitleId)-4]
+
+		multiContent := len(contentMap) > 1
+		switchTitle := &SwitchGameFiles{
+			MultiContent: multiContent,
+			Updates:      map[int]SwitchFileInfo{},
+			Dlc:          map[string]SwitchFileInfo{},
+			BaseExist:    false,
+			IsSplit:      false,
+			LatestUpdate: 0,
+		}
+		if t, ok := titles[idPrefix]; ok {
+			switchTitle = t
+		}
+		titles[idPrefix] = switchTitle
+
+		// Process Updates
+		if strings.HasSuffix(metadata.TitleId, "800") {
+			metadata.Type = "Update"
+
+			if update, ok := switchTitle.Updates[metadata.Version]; ok {
+				skipped[file] = SkippedFile{
+					ReasonCode: REASON_DUPLICATE,
+					ReasonText: "duplicate update file (" + update.ExtendedInfo.FileName + ")",
+				}
+				zap.S().Warnf("-->Duplicate update file found [%v] and [%v]", update.ExtendedInfo.FileName, file.FileName)
+				continue
+			}
+			switchTitle.Updates[metadata.Version] = SwitchFileInfo{ExtendedInfo: file, Metadata: metadata}
+			if metadata.Version > switchTitle.LatestUpdate {
+				if switchTitle.LatestUpdate != 0 {
+					skipped[switchTitle.Updates[switchTitle.LatestUpdate].ExtendedInfo] = SkippedFile{
+						ReasonCode: REASON_OLD_UPDATE,
+						ReasonText: "old update file, newer update exist locally",
+					}
+				}
+				switchTitle.LatestUpdate = metadata.Version
+			} else {
+				skipped[file] = SkippedFile{
+					ReasonCode: REASON_OLD_UPDATE,
+					ReasonText: "old update file, newer update exist locally",
+				}
+			}
+			continue
+		}
+
+		// Process base
+		if strings.HasSuffix(metadata.TitleId, "000") {
+			metadata.Type = "Base"
+			if switchTitle.BaseExist {
+				skipped[file] = SkippedFile{
+					ReasonCode: REASON_DUPLICATE,
+					ReasonText: "duplicate base file (" + switchTitle.File.ExtendedInfo.FileName + ")",
+				}
+				zap.S().Warnf("-->Duplicate base file found [%v] and [%v]", file.FileName, switchTitle.File.ExtendedInfo.FileName)
+				continue
+			}
+			switchTitle.File = SwitchFileInfo{ExtendedInfo: file, Metadata: metadata}
+			switchTitle.BaseExist = true
+			continue
+		}
+
+		// Process DLC
+		if dlc, ok := switchTitle.Dlc[metadata.TitleId]; ok {
+			if metadata.Version < dlc.Metadata.Version {
+				skipped[file] = SkippedFile{
+					ReasonCode: REASON_OLD_UPDATE,
+					ReasonText: "old DLC file, newer version exist locally",
+				}
+				zap.S().Warnf("-->Old DLC file found [%v] and [%v]", file.FileName, dlc.ExtendedInfo.FileName)
+				continue
+			} else if metadata.Version == dlc.Metadata.Version {
+				skipped[file] = SkippedFile{
+					ReasonCode: REASON_DUPLICATE,
+					ReasonText: "duplicate DLC file (" + dlc.ExtendedInfo.FileName + ")",
+				}
+				zap.S().Warnf("-->Duplicate DLC file found [%v] and [%v]", file.FileName, dlc.ExtendedInfo.FileName)
+				continue
+			}
+		}
+		// Not an update, and not main title, so treat it as a DLC
+		metadata.Type = "DLC"
+		switchTitle.Dlc[metadata.TitleId] = SwitchFileInfo{ExtendedInfo: file, Metadata: metadata}
+	}
 }
 
 func (ldb *LocalSwitchDBManager) getGameMetadata(file ExtendedFileInfo,
