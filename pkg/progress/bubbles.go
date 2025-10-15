@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -44,6 +45,18 @@ type Model struct {
 	filesFound  int
 	totalSize   int64
 	recentFiles []string
+	
+	// Worker statistics
+	workerStats *WorkerStats
+	environment string
+}
+
+// WorkerStats represents worker pool statistics
+type WorkerStats struct {
+	TotalWorkers  int
+	ActiveWorkers int
+	FilesPerSec   float64
+	ETA           time.Duration
 }
 
 // ProgressMsg represents progress updates
@@ -53,6 +66,10 @@ type ProgressMsg struct {
 	Total   int
 	Message string
 	Details []string
+	
+	// Worker statistics (optional)
+	WorkerStats *WorkerStats
+	Environment string
 }
 
 // CompleteMsg indicates stage completion
@@ -106,6 +123,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.stages[msg.Stage].Status = StageInProgress
 			m.message = msg.Message
 			
+			// Update worker statistics if provided
+			if msg.WorkerStats != nil {
+				m.workerStats = msg.WorkerStats
+			}
+			
+			// Update environment info if provided
+			if msg.Environment != "" {
+				m.environment = msg.Environment
+			}
+			
 			// Parse discovery phase info from message
 			if msg.Current < 0 && msg.Total < 0 {
 				// Discovery phase - extract filename from "scanning <filename>"
@@ -139,6 +166,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.filesFound = 0
 			m.totalSize = 0
 			m.recentFiles = make([]string, 0, 3)
+			m.workerStats = nil
 		}
 
 	case ErrorMsg:
@@ -189,6 +217,27 @@ func (m Model) View() string {
 				progressBar := m.progress.ViewAs(percentage)
 				b.WriteString(fmt.Sprintf("🔄 [%d/%d] %s %s %d/%d (%.1f%%)\n",
 					i+1, len(m.stages), stage.Name, progressBar, stage.Current, stage.Total, percentage*100))
+				
+				// Show environment info if available
+				if m.environment != "" {
+					b.WriteString(fmt.Sprintf("      Environment: %s\n", m.environment))
+				}
+				
+				// Show worker statistics if available
+				if m.workerStats != nil && m.workerStats.TotalWorkers > 0 {
+					b.WriteString(fmt.Sprintf("      Workers: %d total", m.workerStats.TotalWorkers))
+					
+					// Show processing rate if available
+					if m.workerStats.FilesPerSec > 0 {
+						b.WriteString(fmt.Sprintf(" | Rate: %.1f files/sec", m.workerStats.FilesPerSec))
+						
+						// Show ETA if available
+						if m.workerStats.ETA > 0 {
+							b.WriteString(fmt.Sprintf(" | ETA: %s", formatDuration(m.workerStats.ETA)))
+						}
+					}
+					b.WriteString("\n")
+				}
 			} else {
 				// Discovery phase - show spinner with file count
 				spinnerView := m.spinner.View()
@@ -411,4 +460,22 @@ func formatBytes(bytes int64) string {
 		exp = len(units) - 1
 	}
 	return fmt.Sprintf("%.1f %s", float64(bytes)/float64(div), units[exp])
+}
+
+// formatDuration formats duration in human-readable format
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return "< 1s"
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	minutes := int(d.Minutes())
+	seconds := int(d.Seconds()) % 60
+	if minutes < 60 {
+		return fmt.Sprintf("%dm %ds", minutes, seconds)
+	}
+	hours := minutes / 60
+	minutes = minutes % 60
+	return fmt.Sprintf("%dh %dm", hours, minutes)
 }

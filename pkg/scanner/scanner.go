@@ -18,7 +18,9 @@ import (
 
 // progressUpdaterAdapter adapts the old ProgressUpdater interface
 type progressUpdaterAdapter struct {
-	updateFunc func(current, total int, message string)
+	updateFunc  func(current, total int, message string)
+	environment string
+	numWorkers  int
 }
 
 func (p *progressUpdaterAdapter) UpdateProgress(current, total int, message string) {
@@ -281,21 +283,9 @@ func (s *Scanner) scanFiles(updater progress.ProgressUpdater) (*db.LocalSwitchFi
 		return nil, nil, fmt.Errorf("failed to create local DB manager: %v", err)
 	}
 
-	// Create progress updater that adapts to the old interface
-	progressUpdaterAdapter := &progressUpdaterAdapter{
-		updateFunc: func(current, total int, message string) {
-			details := make([]string, 0)
-			if current >= 0 && total > 0 {
-				updater.UpdateProgress(1, current, total,
-					fmt.Sprintf("Processing file %d of %d", current+1, total), details...)
-			} else {
-				updater.UpdateProgress(1, 0, 0, "Discovering files...", details...)
-			}
-		},
-	}
-
 	// Determine number of workers adaptively
 	var numWorkers int
+	var envStr string
 	if s.options.MaxWorkers > 0 {
 		// User specified worker count - use it
 		numWorkers = s.options.MaxWorkers
@@ -310,9 +300,25 @@ func (s *Scanner) scanFiles(updater progress.ProgressUpdater) (*db.LocalSwitchFi
 		} else {
 			sysRes, _ := performance.GetSystemResources()
 			numWorkers = performance.DetermineOptimalWorkers(env, sysRes)
-			s.logger.Infof("Auto-detected environment: %s (%s), optimal workers: %d (CPU cores: %d)", 
-				env.MountType, env.FileSystem, numWorkers, sysRes.CPUCores)
+			envStr = fmt.Sprintf("%s (%s)", env.MountType, env.FileSystem)
+			s.logger.Infof("Auto-detected environment: %s, optimal workers: %d (CPU cores: %d)", 
+				envStr, numWorkers, sysRes.CPUCores)
 		}
+	}
+
+	// Create progress updater that adapts to the old interface
+	progressUpdaterAdapter := &progressUpdaterAdapter{
+		updateFunc: func(current, total int, message string) {
+			details := make([]string, 0)
+			if current >= 0 && total > 0 {
+				updater.UpdateProgress(1, current, total,
+					fmt.Sprintf("Processing file %d of %d", current+1, total), details...)
+			} else {
+				updater.UpdateProgress(1, 0, 0, "Discovering files...", details...)
+			}
+		},
+		environment: envStr,
+		numWorkers:  numWorkers,
 	}
 
 	// Scan files with worker pool

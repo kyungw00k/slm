@@ -1,0 +1,332 @@
+package performance
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"runtime"
+	"sync"
+	"time"
+
+	"github.com/giwty/switch-library-manager/db"
+	"go.uber.org/zap"
+)
+
+// ScanMetrics tracks performance metrics during scanning
+type ScanMetrics struct {
+	StartTime     time.Time
+	FilesFound    int64
+	FilesScanned  int64
+	BytesScanned  int64
+	Goroutines    int
+	MemoryUsageMB float64
+	ScanDuration  time.Duration
+}
+
+// PerformanceConfig holds configuration for performance optimizations
+type PerformanceConfig struct {
+	MaxWorkers       int           // Maximum concurrent workers
+	WorkerPoolSize   int           // Size of worker pool
+	BatchSize        int           // Number of files to process in batch
+	MemoryLimit      int64         // Memory limit in MB
+	ScanTimeout      time.Duration // Timeout for individual file scans
+	EnableProfiling  bool          // Enable performance profiling
+}
+
+// DefaultPerformanceConfig returns default performance configuration
+func DefaultPerformanceConfig() *PerformanceConfig {
+	return &PerformanceConfig{
+		MaxWorkers:      runtime.NumCPU() * 2, // 2x CPU cores
+		WorkerPoolSize:  10,
+		BatchSize:       50,
+		MemoryLimit:     512, // 512MB
+		ScanTimeout:     30 * time.Second,
+		EnableProfiling: false,
+	}
+}
+
+// OptimizedFileScanner provides optimized file scanning with memory management
+type OptimizedFileScanner struct {
+	config      *PerformanceConfig
+	metrics     *ScanMetrics
+	logger      *zap.Logger
+	workerPool  chan struct{}
+	resultChan  chan ScanResult
+	errorChan   chan error
+	ctx         context.Context
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	mu          sync.RWMutex
+}
+
+// ScanResult represents the result of scanning a single file
+type ScanResult struct {
+	FilePath string
+	FileInfo *db.SwitchFile
+	Error    error
+	Duration time.Duration
+}
+
+// NewOptimizedFileScanner creates a new optimized file scanner
+func NewOptimizedFileScanner(config *PerformanceConfig, logger *zap.Logger) *OptimizedFileScanner {
+	if config == nil {
+		config = DefaultPerformanceConfig()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	return &OptimizedFileScanner{
+		config:     config,
+		metrics:    &ScanMetrics{StartTime: time.Now()},
+		logger:     logger,
+		workerPool: make(chan struct{}, config.MaxWorkers),
+		resultChan: make(chan ScanResult, config.WorkerPoolSize),
+		errorChan:  make(chan error, config.WorkerPoolSize),
+		ctx:        ctx,
+		cancel:     cancel,
+	}
+}
+
+// ScanFiles scans files with optimized performance
+func (s *OptimizedFileScanner) ScanFiles(filePaths []string, updater db.ProgressUpdater) (*db.LocalSwitchFilesDB, error) {
+	s.metrics.StartTime = time.Now()
+	s.metrics.FilesFound = int64(len(filePaths))
+
+	s.logger.Info("Starting optimized file scan",
+		zap.Int("total_files", len(filePaths)),
+		zap.Int("max_workers", s.config.MaxWorkers),
+		zap.Int("batch_size", s.config.BatchSize))
+
+	// Create local database
+	localDB := &db.LocalSwitchFilesDB{
+		TitlesMap: make(map[string]*db.SwitchGameFiles),
+	}
+
+	// Start result collector
+	go s.collectResults(localDB, updater)
+
+	// Process files in batches to manage memory
+	totalFiles := len(filePaths)
+	processed := 0
+
+	for i := 0; i < totalFiles; i += s.config.BatchSize {
+		// Check memory usage and GC if needed
+		if err := s.checkMemoryUsage(); err != nil {
+			s.logger.Warn("Memory usage high, forcing garbage collection", zap.Error(err))
+			runtime.GC()
+		}
+
+		// Process batch
+		end := i + s.config.BatchSize
+		if end > totalFiles {
+			end = totalFiles
+		}
+
+		batch := filePaths[i:end]
+		s.processBatch(batch)
+
+		processed += len(batch)
+		if updater != nil {
+			updater.UpdateProgress(processed, totalFiles, "Processing files...")
+		}
+
+		// Check if context was cancelled
+		select {
+		case <-s.ctx.Done():
+			return nil, s.ctx.Err()
+		default:
+		}
+	}
+
+	// Wait for all workers to complete
+	s.wg.Wait()
+	close(s.resultChan)
+	close(s.errorChan)
+
+	// Finalize metrics
+	s.metrics.ScanDuration = time.Since(s.metrics.StartTime)
+	s.metrics.Goroutines = runtime.NumGoroutine()
+
+	s.logger.Info("File scan completed",
+		zap.Duration("duration", s.metrics.ScanDuration),
+		zap.Int64("files_scanned", s.metrics.FilesScanned),
+		zap.Int64("bytes_scanned", s.metrics.BytesScanned),
+		zap.Float64("memory_usage_mb", s.metrics.MemoryUsageMB))
+
+	return localDB, nil
+}
+
+// processBatch processes a batch of files concurrently
+func (s *OptimizedFileScanner) processBatch(filePaths []string) {
+	for _, filePath := range filePaths {
+		s.wg.Add(1)
+		go s.processFile(filePath)
+	}
+}
+
+// processFile processes a single file
+func (s *OptimizedFileScanner) processFile(filePath string) {
+	defer s.wg.Done()
+
+	// Acquire worker slot
+	select {
+	case s.workerPool <- struct{}{}:
+		defer func() { <-s.workerPool }()
+	case <-s.ctx.Done():
+		return
+	}
+
+	startTime := time.Now()
+
+	// Create timeout context for this file
+	fileCtx, cancel := context.WithTimeout(s.ctx, s.config.ScanTimeout)
+	defer cancel()
+
+	// Process file with timeout
+	result := s.scanSingleFile(fileCtx, filePath)
+	result.Duration = time.Since(startTime)
+
+	// Send result
+	select {
+	case s.resultChan <- result:
+	case <-s.ctx.Done():
+		return
+	}
+
+	// Update metrics
+	s.mu.Lock()
+	s.metrics.FilesScanned++
+	if result.FileInfo != nil {
+		s.metrics.BytesScanned += result.FileInfo.ExtendedInfo.Size
+	}
+	s.mu.Unlock()
+}
+
+// scanSingleFile scans a single file and extracts metadata
+func (s *OptimizedFileScanner) scanSingleFile(ctx context.Context, filePath string) ScanResult {
+	result := ScanResult{FilePath: filePath}
+
+	// Check if file should be processed based on extension
+	ext := filepath.Ext(filePath)
+	if !s.isValidGameFile(ext) {
+		return result
+	}
+
+	// Simulate file scanning (replace with actual implementation)
+	select {
+	case <-time.After(10 * time.Millisecond): // Simulate processing time
+		// This would call the actual file processing logic
+		// result.FileInfo = actualScanFunction(filePath)
+	case <-ctx.Done():
+		result.Error = ctx.Err()
+		return result
+	}
+
+	return result
+}
+
+// collectResults collects scan results and builds the database
+func (s *OptimizedFileScanner) collectResults(localDB *db.LocalSwitchFilesDB, updater db.ProgressUpdater) {
+	for result := range s.resultChan {
+		if result.Error != nil {
+			s.logger.Warn("File scan error",
+				zap.String("file", result.FilePath),
+				zap.Error(result.Error))
+			continue
+		}
+
+		if result.FileInfo != nil {
+			// Add to database
+			s.addToDatabase(localDB, result.FileInfo)
+		}
+	}
+}
+
+// addToDatabase adds file info to the local database
+func (s *OptimizedFileScanner) addToDatabase(localDB *db.LocalSwitchFilesDB, fileInfo *db.SwitchFile) {
+	// This would implement the actual database addition logic
+	// Similar to existing implementation but with optimizations
+}
+
+// isValidGameFile checks if file extension is valid for game files
+func (s *OptimizedFileScanner) isValidGameFile(ext string) bool {
+	validExts := []string{".nsp", ".nsz", ".xci", ".xcz"}
+	for _, validExt := range validExts {
+		if ext == validExt {
+			return true
+		}
+	}
+	return false
+}
+
+// checkMemoryUsage monitors memory usage and returns error if limit exceeded
+func (s *OptimizedFileScanner) checkMemoryUsage() error {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	currentMB := float64(m.Alloc) / 1024 / 1024
+	s.mu.Lock()
+	s.metrics.MemoryUsageMB = currentMB
+	s.mu.Unlock()
+
+	if currentMB > float64(s.config.MemoryLimit) {
+		return &MemoryLimitExceededError{
+			Current: currentMB,
+			Limit:   float64(s.config.MemoryLimit),
+		}
+	}
+
+	return nil
+}
+
+// GetMetrics returns current scan metrics
+func (s *OptimizedFileScanner) GetMetrics() *ScanMetrics {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Return a copy of metrics
+	metrics := *s.metrics
+	return &metrics
+}
+
+// Stop gracefully stops the scanner
+func (s *OptimizedFileScanner) Stop() {
+	s.cancel()
+}
+
+// MemoryLimitExceededError represents memory limit exceeded error
+type MemoryLimitExceededError struct {
+	Current float64
+	Limit   float64
+}
+
+func (e *MemoryLimitExceededError) Error() string {
+	return fmt.Sprintf("memory usage %.1fMB exceeds limit %.1fMB", e.Current, e.Limit)
+}
+
+// CacheOptimizer provides cache optimization functionality
+type CacheOptimizer struct {
+	config *PerformanceConfig
+	logger *zap.Logger
+}
+
+// NewCacheOptimizer creates a new cache optimizer
+func NewCacheOptimizer(config *PerformanceConfig, logger *zap.Logger) *CacheOptimizer {
+	return &CacheOptimizer{
+		config: config,
+		logger: logger,
+	}
+}
+
+// OptimizeCache performs cache optimization
+func (co *CacheOptimizer) OptimizeCache(cacheDir string) error {
+	co.logger.Info("Starting cache optimization", zap.String("cache_dir", cacheDir))
+
+	// Implement cache optimization strategies:
+	// 1. Remove duplicate entries
+	// 2. Compress old entries
+	// 3. Clean up temporary files
+	// 4. Rebuild corrupted indices
+
+	return nil
+}

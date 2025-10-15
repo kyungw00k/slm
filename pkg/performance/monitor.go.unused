@@ -1,0 +1,255 @@
+package performance
+
+import (
+	"runtime"
+	"sync"
+	"time"
+
+	"go.uber.org/zap"
+)
+
+// MemoryMonitor monitors memory usage and triggers cleanup when needed
+type MemoryMonitor struct {
+	logger        *zap.Logger
+	config        *PerformanceConfig
+	running       bool
+	stopChan      chan struct{}
+	mu            sync.RWMutex
+	lastGC        time.Time
+	gcThreshold   float64 // Memory threshold to trigger GC
+	alertCallback func(usage float64)
+}
+
+// MemoryStats represents current memory statistics
+type MemoryStats struct {
+	AllocMB      float64 `json:"alloc_mb"`
+	TotalAllocMB float64 `json:"total_alloc_mb"`
+	SysMB        float64 `json:"sys_mb"`
+	NumGC        uint32  `json:"num_gc"`
+	GCPauseMS    float64 `json:"gc_pause_ms"`
+	Goroutines   int     `json:"goroutines"`
+	Timestamp    time.Time `json:"timestamp"`
+}
+
+// NewMemoryMonitor creates a new memory monitor
+func NewMemoryMonitor(config *PerformanceConfig, logger *zap.Logger) *MemoryMonitor {
+	return &MemoryMonitor{
+		logger:      logger,
+		config:      config,
+		stopChan:    make(chan struct{}),
+		gcThreshold: float64(config.MemoryLimit) * 0.8, // Trigger GC at 80% of limit
+	}
+}
+
+// Start begins memory monitoring
+func (mm *MemoryMonitor) Start() {
+	mm.mu.Lock()
+	if mm.running {
+		mm.mu.Unlock()
+		return
+	}
+	mm.running = true
+	mm.mu.Unlock()
+
+	go mm.monitorLoop()
+}
+
+// Stop stops memory monitoring
+func (mm *MemoryMonitor) Stop() {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+
+	if !mm.running {
+		return
+	}
+
+	mm.running = false
+	close(mm.stopChan)
+}
+
+// SetAlertCallback sets a callback function for memory alerts
+func (mm *MemoryMonitor) SetAlertCallback(callback func(usage float64)) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	mm.alertCallback = callback
+}
+
+// GetCurrentStats returns current memory statistics
+func (mm *MemoryMonitor) GetCurrentStats() *MemoryStats {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	return &MemoryStats{
+		AllocMB:      bToMb(m.Alloc),
+		TotalAllocMB: bToMb(m.TotalAlloc),
+		SysMB:        bToMb(m.Sys),
+		NumGC:        m.NumGC,
+		GCPauseMS:    float64(m.PauseNs[(m.NumGC+255)%256]) / 1000000,
+		Goroutines:   runtime.NumGoroutine(),
+		Timestamp:    time.Now(),
+	}
+}
+
+// ForceGC forces garbage collection
+func (mm *MemoryMonitor) ForceGC() {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+
+	start := time.Now()
+	runtime.GC()
+	duration := time.Since(start)
+	mm.lastGC = time.Now()
+
+	mm.logger.Info("Forced garbage collection",
+		zap.Duration("duration", duration),
+		zap.Time("timestamp", mm.lastGC))
+}
+
+// monitorLoop runs the monitoring loop
+func (mm *MemoryMonitor) monitorLoop() {
+	ticker := time.NewTicker(5 * time.Second) // Check every 5 seconds
+	defer ticker.Stop()
+
+	mm.logger.Info("Memory monitoring started",
+		zap.Float64("gc_threshold_mb", mm.gcThreshold),
+		zap.Int64("memory_limit_mb", mm.config.MemoryLimit))
+
+	for {
+		select {
+		case <-ticker.C:
+			stats := mm.GetCurrentStats()
+			mm.checkMemoryThresholds(stats)
+		case <-mm.stopChan:
+			mm.logger.Info("Memory monitoring stopped")
+			return
+		}
+	}
+}
+
+// checkMemoryThresholds checks if memory usage exceeds thresholds
+func (mm *MemoryMonitor) checkMemoryThresholds(stats *MemoryStats) {
+	// Log periodic stats in verbose mode
+	mm.logger.Debug("Memory stats",
+		zap.Float64("alloc_mb", stats.AllocMB),
+		zap.Float64("sys_mb", stats.SysMB),
+		zap.Int("goroutines", stats.Goroutines),
+		zap.Uint32("num_gc", stats.NumGC))
+
+	// Check if we should trigger GC
+	if stats.AllocMB > mm.gcThreshold {
+		timeSinceLastGC := time.Since(mm.lastGC)
+		if timeSinceLastGC > 30*time.Second { // Minimum 30 seconds between forced GCs
+			mm.logger.Warn("Memory usage high, triggering garbage collection",
+				zap.Float64("current_mb", stats.AllocMB),
+				zap.Float64("threshold_mb", mm.gcThreshold),
+				zap.Duration("time_since_last_gc", timeSinceLastGC))
+
+			mm.ForceGC()
+		}
+	}
+
+	// Check if we've exceeded the memory limit
+	if stats.AllocMB > float64(mm.config.MemoryLimit) {
+		mm.logger.Error("Memory limit exceeded",
+			zap.Float64("current_mb", stats.AllocMB),
+			zap.Int64("limit_mb", mm.config.MemoryLimit))
+
+		// Trigger alert callback if set
+		mm.mu.RLock()
+		if mm.alertCallback != nil {
+			go mm.alertCallback(stats.AllocMB)
+		}
+		mm.mu.RUnlock()
+	}
+}
+
+// GetMemoryReport generates a detailed memory report
+func (mm *MemoryMonitor) GetMemoryReport() map[string]interface{} {
+	stats := mm.GetCurrentStats()
+
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	return map[string]interface{}{
+		"current_stats": stats,
+		"detailed_stats": map[string]interface{}{
+			"heap_alloc_mb":     bToMb(m.HeapAlloc),
+			"heap_sys_mb":       bToMb(m.HeapSys),
+			"heap_idle_mb":      bToMb(m.HeapIdle),
+			"heap_inuse_mb":     bToMb(m.HeapInuse),
+			"heap_released_mb":  bToMb(m.HeapReleased),
+			"heap_objects":      m.HeapObjects,
+			"stack_inuse_mb":    bToMb(m.StackInuse),
+			"stack_sys_mb":      bToMb(m.StackSys),
+			"gc_cpu_fraction":   m.GCCPUFraction,
+			"next_gc_mb":        bToMb(m.NextGC),
+		},
+		"config": map[string]interface{}{
+			"memory_limit_mb": mm.config.MemoryLimit,
+			"gc_threshold_mb": mm.gcThreshold,
+			"max_workers":     mm.config.MaxWorkers,
+		},
+	}
+}
+
+// bToMb converts bytes to megabytes
+func bToMb(b uint64) float64 {
+	return float64(b) / 1024 / 1024
+}
+
+// PerformanceProfiler provides CPU and memory profiling
+type PerformanceProfiler struct {
+	config    *PerformanceConfig
+	logger    *zap.Logger
+	startTime time.Time
+	monitor   *MemoryMonitor
+}
+
+// NewPerformanceProfiler creates a new performance profiler
+func NewPerformanceProfiler(config *PerformanceConfig, logger *zap.Logger) *PerformanceProfiler {
+	return &PerformanceProfiler{
+		config:  config,
+		logger:  logger,
+		monitor: NewMemoryMonitor(config, logger),
+	}
+}
+
+// Start begins profiling
+func (pp *PerformanceProfiler) Start() {
+	pp.startTime = time.Now()
+	pp.monitor.Start()
+
+	if pp.config.EnableProfiling {
+		pp.logger.Info("Performance profiling enabled")
+		// Initialize CPU profiling if needed
+		// pprof.StartCPUProfile(...)
+	}
+}
+
+// Stop ends profiling and generates report
+func (pp *PerformanceProfiler) Stop() *PerformanceReport {
+	duration := time.Since(pp.startTime)
+	pp.monitor.Stop()
+
+	stats := pp.monitor.GetCurrentStats()
+
+	report := &PerformanceReport{
+		Duration:       duration,
+		MemoryStats:    stats,
+		DetailedReport: pp.monitor.GetMemoryReport(),
+	}
+
+	pp.logger.Info("Performance profiling completed",
+		zap.Duration("total_duration", duration),
+		zap.Float64("final_memory_mb", stats.AllocMB),
+		zap.Int("final_goroutines", stats.Goroutines))
+
+	return report
+}
+
+// PerformanceReport contains performance analysis results
+type PerformanceReport struct {
+	Duration       time.Duration              `json:"duration"`
+	MemoryStats    *MemoryStats              `json:"memory_stats"`
+	DetailedReport map[string]interface{}     `json:"detailed_report"`
+}
