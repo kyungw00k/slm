@@ -8,6 +8,7 @@ import (
 
 	"github.com/giwty/switch-library-manager/db"
 	"github.com/giwty/switch-library-manager/pkg/config"
+	"github.com/giwty/switch-library-manager/pkg/performance"
 	"github.com/giwty/switch-library-manager/pkg/progress"
 	"github.com/giwty/switch-library-manager/pkg/templates"
 	"github.com/giwty/switch-library-manager/process"
@@ -293,10 +294,25 @@ func (s *Scanner) scanFiles(updater progress.ProgressUpdater) (*db.LocalSwitchFi
 		},
 	}
 
-	// Determine number of workers
-	numWorkers := s.options.MaxWorkers
-	if numWorkers <= 0 {
-		numWorkers = runtime.NumCPU()
+	// Determine number of workers adaptively
+	var numWorkers int
+	if s.options.MaxWorkers > 0 {
+		// User specified worker count - use it
+		numWorkers = s.options.MaxWorkers
+		s.logger.Infof("Using user-specified worker count: %d", numWorkers)
+	} else {
+		// Auto-detect optimal worker count based on environment
+		env, err := performance.DetectEnvironment(s.options.Folders[0])
+		if err != nil {
+			// Fallback to CPU count on error
+			numWorkers = runtime.NumCPU()
+			s.logger.Warnf("Failed to detect environment, using CPU count: %d", numWorkers)
+		} else {
+			sysRes, _ := performance.GetSystemResources()
+			numWorkers = performance.DetermineOptimalWorkers(env, sysRes)
+			s.logger.Infof("Auto-detected environment: %s (%s), optimal workers: %d (CPU cores: %d)", 
+				env.MountType, env.FileSystem, numWorkers, sysRes.CPUCores)
+		}
 	}
 
 	// Scan files with worker pool
