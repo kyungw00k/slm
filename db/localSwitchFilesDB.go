@@ -14,6 +14,7 @@ import (
 	"github.com/giwty/switch-library-manager/fileio"
 	"github.com/giwty/switch-library-manager/settings"
 	"github.com/giwty/switch-library-manager/switchfs"
+	"github.com/karrick/godirwalk"
 	"go.uber.org/zap"
 )
 
@@ -124,19 +125,38 @@ func (ldb *LocalSwitchDBManager) CreateLocalSwitchFilesDB(folders []string,
 		ldb.db.GetEntry(DB_TABLE_LOCAL_LIBRARY, "titles", &titles)
 	}
 
-	if len(titles) == 0 {
-
-		for i, folder := range folders {
-			err := scanFolder(folder, recursive, &files, progress)
-			if progress != nil {
-				progress.UpdateProgress(i+1, len(folders)+1, "scanning files in "+folder)
-			}
-			if err != nil {
-				continue
-			}
+	// Always scan if ignoreCache is true or if no titles found
+	if ignoreCache || len(titles) == 0 {
+		// Reset collections for fresh scan when ignoring cache
+		if ignoreCache {
+			titles = map[string]*SwitchGameFiles{}
+			skipped = map[ExtendedFileInfo]SkippedFile{}
+			files = []ExtendedFileInfo{}
 		}
 
-		ldb.processLocalFilesWithWorkers(files, progress, titles, skipped, numWorkers)
+		// Use parallel folder scanning with streaming pipeline
+		fileCount := ldb.scanFoldersParallelStreaming(folders, recursive, progress, titles, skipped, numWorkers)
+
+		// Collect all files for database storage
+		for _, gameFiles := range titles {
+			if gameFiles.BaseExist {
+				files = append(files, gameFiles.File.ExtendedInfo)
+			}
+			for _, update := range gameFiles.Updates {
+				files = append(files, update.ExtendedInfo)
+			}
+			for _, dlc := range gameFiles.Dlc {
+				files = append(files, dlc.ExtendedInfo)
+			}
+		}
+		for skipFile := range skipped {
+			files = append(files, skipFile)
+		}
+
+		// Update progress after all processing complete
+		if progress != nil {
+			progress.UpdateProgress(fileCount, fileCount, fmt.Sprintf("Complete: processed %d files across %d folders", fileCount, len(folders)))
+		}
 
 		ldb.db.AddEntry(DB_TABLE_LOCAL_LIBRARY, "files", files)
 		ldb.db.AddEntry(DB_TABLE_LOCAL_LIBRARY, "skipped", skipped)
@@ -150,37 +170,361 @@ func (ldb *LocalSwitchDBManager) CreateLocalSwitchFilesDB(folders []string,
 	return &LocalSwitchFilesDB{TitlesMap: titles, Skipped: skipped, NumFiles: len(files)}, nil
 }
 
-func scanFolder(folder string, recursive bool, files *[]ExtendedFileInfo, progress ProgressUpdater) error {
-	filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
-		if path == folder {
-			return nil
-		}
-		if err != nil {
-			zap.S().Error("Error while scanning folders", err)
-			return nil
-		}
+// scanFoldersParallelStreaming scans multiple folders in parallel with streaming processing
+func (ldb *LocalSwitchDBManager) scanFoldersParallelStreaming(
+	folders []string,
+	recursive bool,
+	progress ProgressUpdater,
+	titles map[string]*SwitchGameFiles,
+	skipped map[ExtendedFileInfo]SkippedFile,
+	numWorkers int) int {
 
-		if info.IsDir() {
-			return nil
-		}
+	if len(folders) == 0 {
+		return 0
+	}
 
-		//skip mac hidden files
-		if info.Name()[0:1] == "." {
-			return nil
-		}
-		base := path[0 : len(path)-len(info.Name())]
-		if strings.TrimSuffix(base, string(os.PathSeparator)) != strings.TrimSuffix(folder, string(os.PathSeparator)) &&
-			!recursive {
-			return nil
-		}
-		if progress != nil {
-			progress.UpdateProgress(-1, -1, "scanning "+info.Name())
-		}
-		*files = append(*files, ExtendedFileInfo{FileName: info.Name(), BaseFolder: base, Size: info.Size(), IsDir: info.IsDir()})
+	// Channels for streaming pipeline
+	filesChan := make(chan ExtendedFileInfo, numWorkers*2)
 
-		return nil
+	// WaitGroup for folder scanning goroutines
+	var scanWg sync.WaitGroup
+
+	// Thread-safe counters
+	var totalFilesFound int64
+	var processedFiles int64
+	var counterMu sync.Mutex
+
+	// Thread-safe maps
+	var mapMu sync.Mutex
+
+	// Start folder scanning goroutines
+	for i, folder := range folders {
+		scanWg.Add(1)
+		go func(folderIdx int, folderPath string) {
+			defer scanWg.Done()
+
+			// Update progress for this folder
+			if progress != nil {
+				folderName := filepath.Base(folderPath)
+				if len(folderName) > 50 {
+					runes := []rune(folderName)
+					if len(runes) > 50 {
+						folderName = string(runes[:47]) + "..."
+					}
+				}
+				progress.UpdateProgress(folderIdx, len(folders),
+					fmt.Sprintf("scanning folder %d/%d: %s", folderIdx+1, len(folders), folderName))
+			}
+
+			ldb.scanFolderStreaming(folderPath, recursive, filesChan, progress, folderIdx, len(folders), &totalFilesFound, &counterMu)
+		}(i, folder)
+	}
+
+	// Close filesChan when all scanning is done
+	go func() {
+		scanWg.Wait()
+		close(filesChan)
+	}()
+
+	// Start worker pool for processing files
+	jobs := make(chan FileJob, numWorkers*2)
+	results := make(chan FileResult, numWorkers*2)
+
+	var workerWg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		workerWg.Add(1)
+		go ldb.fileWorker(w, jobs, results, &workerWg)
+	}
+
+	// Result collector goroutine
+	done := make(chan bool)
+	go func() {
+		for result := range results {
+			counterMu.Lock()
+			processedFiles++
+			current := processedFiles
+			counterMu.Unlock()
+
+			// Update progress
+			if progress != nil && (current%10 == 0 || current == 1) {
+				progress.UpdateProgress(int(current), 0, "processing:"+result.File.FileName)
+			}
+
+			// Handle skipped file
+			if result.Skipped != nil {
+				mapMu.Lock()
+				skipped[result.File] = *result.Skipped
+				mapMu.Unlock()
+				continue
+			}
+
+			// Handle error
+			if result.Error != nil {
+				mapMu.Lock()
+				if _, ok := skipped[result.File]; !ok {
+					skipped[result.File] = SkippedFile{
+						ReasonText: "unable to determine title-Id / version - " + result.Error.Error(),
+						ReasonCode: REASON_UNRECOGNISED,
+					}
+				}
+				mapMu.Unlock()
+				continue
+			}
+
+			// Process content metadata with thread safety
+			if result.ContentMap != nil {
+				mapMu.Lock()
+				ldb.processContentMetadata(result.File, result.ContentMap, titles, skipped)
+				mapMu.Unlock()
+			}
+		}
+		done <- true
+	}()
+
+	// Stream files from scanner to workers
+	go func() {
+		jobIdx := 0
+		for file := range filesChan {
+			jobs <- FileJob{File: file, Index: jobIdx}
+			jobIdx++
+		}
+		close(jobs)
+	}()
+
+	// Wait for workers to finish
+	workerWg.Wait()
+	close(results)
+
+	// Wait for result collector
+	<-done
+
+	return int(processedFiles)
+}
+
+// scanFolderStreaming scans a folder and streams files to a channel
+func (ldb *LocalSwitchDBManager) scanFolderStreaming(
+	folder string,
+	recursive bool,
+	filesChan chan<- ExtendedFileInfo,
+	progress ProgressUpdater,
+	folderIdx int,
+	totalFolders int,
+	totalFilesFound *int64,
+	counterMu *sync.Mutex) error {
+
+	localFilesFound := 0
+
+	err := godirwalk.Walk(folder, &godirwalk.Options{
+		Callback: func(osPathname string, de *godirwalk.Dirent) error {
+			// Skip the root folder itself
+			if osPathname == folder {
+				return nil
+			}
+
+			// Handle directories
+			if de.IsDir() {
+				if !recursive && osPathname != folder {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			// Skip hidden files
+			name := de.Name()
+			if len(name) > 0 && name[0:1] == "." {
+				return nil
+			}
+
+			// Check if this file is in a subdirectory when not recursive
+			base := filepath.Dir(osPathname) + string(os.PathSeparator)
+			if strings.TrimSuffix(base, string(os.PathSeparator)) != strings.TrimSuffix(folder, string(os.PathSeparator)) &&
+				!recursive {
+				return nil
+			}
+
+			// Early filtering: Only process supported file types
+			fileName := strings.ToLower(name)
+			isSplit := false
+
+			// Check for split files
+			if len(fileName) >= 2 {
+				if partNum, err := strconv.Atoi(fileName[len(fileName)-2:]); err == nil {
+					if partNum == 0 {
+						isSplit = true
+					} else {
+						// Skip non-zero split parts
+						return nil
+					}
+				}
+			}
+
+			// Only process files with supported extensions
+			if !isSplit &&
+				!strings.HasSuffix(fileName, ".xci") &&
+				!strings.HasSuffix(fileName, ".nsp") &&
+				!strings.HasSuffix(fileName, ".nsz") &&
+				!strings.HasSuffix(fileName, ".xcz") {
+				return nil
+			}
+
+			// Get file info for size
+			info, err := os.Stat(osPathname)
+			if err != nil {
+				zap.S().Warnf("Failed to stat file %s: %v", osPathname, err)
+				return nil
+			}
+
+			// Stream file to channel immediately
+			filesChan <- ExtendedFileInfo{
+				FileName:   name,
+				BaseFolder: base,
+				Size:       info.Size(),
+				IsDir:      false,
+			}
+
+			localFilesFound++
+
+			// Update total counter atomically
+			if totalFilesFound != nil && counterMu != nil {
+				counterMu.Lock()
+				*totalFilesFound++
+				counterMu.Unlock()
+			}
+
+			// Update progress periodically
+			if progress != nil && (localFilesFound%10 == 0 || localFilesFound == 1) {
+				displayName := truncateUTF8(name, 40)
+				progress.UpdateProgress(localFilesFound, 0,
+					fmt.Sprintf("[folder %d/%d] %s", folderIdx+1, totalFolders, displayName))
+			}
+
+			return nil
+		},
+		Unsorted:      true,
+		ScratchBuffer: make([]byte, 64*1024),
+		ErrorCallback: func(osPathname string, err error) godirwalk.ErrorAction {
+			zap.S().Errorf("Error scanning %s: %v", osPathname, err)
+			return godirwalk.SkipNode
+		},
 	})
-	return nil
+
+	return err
+}
+
+// truncateUTF8 truncates a string to maxLen runes, adding "..." if truncated
+func truncateUTF8(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen-3]) + "..."
+}
+
+func scanFolder(folder string, recursive bool, files *[]ExtendedFileInfo, progress ProgressUpdater) error {
+	filesFound := 0
+
+	// Use godirwalk for better performance on network filesystems
+	err := godirwalk.Walk(folder, &godirwalk.Options{
+		Callback: func(osPathname string, de *godirwalk.Dirent) error {
+			// Skip the root folder itself
+			if osPathname == folder {
+				return nil
+			}
+
+			// Handle directories
+			if de.IsDir() {
+				// If not recursive, skip subdirectories
+				if !recursive && osPathname != folder {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			// Skip hidden files (starting with .)
+			name := de.Name()
+			if len(name) > 0 && name[0:1] == "." {
+				return nil
+			}
+
+			// Check if this file is in a subdirectory when not recursive
+			base := filepath.Dir(osPathname) + string(os.PathSeparator)
+			if strings.TrimSuffix(base, string(os.PathSeparator)) != strings.TrimSuffix(folder, string(os.PathSeparator)) &&
+				!recursive {
+				return nil
+			}
+
+			// Early filtering: Only add supported file types to the list
+			fileName := strings.ToLower(name)
+			isSplit := false
+
+			// Check for split files (files ending with numbers like .00, .01, etc.)
+			if len(fileName) >= 2 {
+				if partNum, err := strconv.Atoi(fileName[len(fileName)-2:]); err == nil {
+					if partNum == 0 {
+						isSplit = true
+					} else {
+						// Skip non-zero split parts (they'll be processed with part 0)
+						return nil
+					}
+				}
+			}
+
+			// Only add files with supported extensions
+			if !isSplit &&
+				!strings.HasSuffix(fileName, ".xci") &&
+				!strings.HasSuffix(fileName, ".nsp") &&
+				!strings.HasSuffix(fileName, ".nsz") &&
+				!strings.HasSuffix(fileName, ".xcz") {
+				// Skip unsupported file types immediately (don't add to memory)
+				return nil
+			}
+
+			// Get file info for size
+			info, err := os.Stat(osPathname)
+			if err != nil {
+				zap.S().Warnf("Failed to stat file %s: %v", osPathname, err)
+				return nil
+			}
+
+			// Add file to list (only supported types reach here)
+			*files = append(*files, ExtendedFileInfo{
+				FileName:   name,
+				BaseFolder: base,
+				Size:       info.Size(),
+				IsDir:      false,
+			})
+			filesFound++
+
+			// Update progress every 10 files to minimize overhead on network filesystems
+			if progress != nil && (filesFound%10 == 0 || filesFound == 1) {
+				displayName := name
+				// Truncate long filenames to 40 characters
+				if len(displayName) > 40 {
+					// Handle UTF-8 properly by converting to rune slice
+					runes := []rune(displayName)
+					if len(runes) > 40 {
+						displayName = string(runes[:37]) + "..."
+					}
+				}
+				progress.UpdateProgress(filesFound, 0, fmt.Sprintf("scanning: %s", displayName))
+			}
+
+			return nil
+		},
+		Unsorted:      true,              // Don't sort entries (faster)
+		ScratchBuffer: make([]byte, 64*1024), // 64KB buffer for better network performance
+		ErrorCallback: func(osPathname string, err error) godirwalk.ErrorAction {
+			zap.S().Errorf("Error scanning %s: %v", osPathname, err)
+			return godirwalk.SkipNode
+		},
+	})
+
+	// Final update when scanning completes
+	if progress != nil && filesFound > 0 {
+		progress.UpdateProgress(filesFound, filesFound, fmt.Sprintf("scan complete: %d files found", filesFound))
+	}
+
+	return err
 }
 
 func (ldb *LocalSwitchDBManager) ClearScanData() error {

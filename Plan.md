@@ -28,10 +28,116 @@ Switch Library Manager (SLM)를 현재의 GUI/Console 하이브리드 구조에�
 
 ### 📋 다음 단계
 
-1. 워커 상태 표시 완성
-2. 다중 폴더 병렬 스캔
-3. 테스트 작성
-4. 문서화
+1. **파일 탐색 단계 진행 상황 개선** ⭐ 현재 작업
+2. 워커 상태 표시 완성
+3. 다중 폴더 병렬 스캔
+4. 테스트 작성
+5. 문서화
+
+---
+
+## 현재 작업: 파일 스캔 진행 상황 개선 (2025-10-21)
+
+### 문제점
+네트워크 파일 시스템에서 파일 탐색 시 진행 상황이 불명확:
+- Stage 2 (Scan files)에서 10초 이상 소요되는데 진행률이 보이지 않음
+- `filepath.Walk()`가 순차적으로 동작하며 current/total이 -1로 고정
+- 사용자가 프로그램이 멈춘 것인지 작동 중인지 알 수 없음
+
+### 해결 방안: 발견된 파일 수 실시간 표시
+
+**구현 계획:**
+
+1. **`scanFolder` 함수 개선** (db/localSwitchFilesDB.go:160-191)
+   ```go
+   // 발견된 파일 수를 실시간으로 업데이트
+   filesFound := 0
+   filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
+       if shouldIncludeFile(info) {
+           filesFound++
+           *files = append(*files, ExtendedFileInfo{...})
+
+           // 10개마다 진행 상황 업데이트
+           if progress != nil && (filesFound % 10 == 0) {
+               progress.UpdateProgress(1, filesFound, 0,
+                   fmt.Sprintf("Found %d files", filesFound),
+                   "Current: " + truncateFilename(info.Name(), 40))
+           }
+       }
+   })
+   ```
+
+2. **폴더별 진행 상황 표시** (db/localSwitchFilesDB.go:136-144)
+   ```go
+   // 여러 폴더 스캔 시 폴더별 진행도 표시
+   for i, folder := range folders {
+       updater.UpdateProgress(1, i, len(folders),
+           fmt.Sprintf("Scanning folder %d/%d", i+1, len(folders)),
+           filepath.Base(folder))
+
+       scanFolder(folder, recursive, &files, progress)
+   }
+   ```
+
+3. **환경 정보 표시** (pkg/scanner/scanner.go:316-387)
+   ```go
+   // 사용자에게 환경 및 워커 정보 제공
+   envInfo := fmt.Sprintf("Environment: %s | Workers: %d", envStr, numWorkers)
+   updater.UpdateProgress(1, 0, 0, "Starting file scan...", envInfo)
+   ```
+
+### 예상 결과
+
+**Before:**
+```
+Stage 2: Scan files - Initializing file scanner
+```
+(아무 변화 없이 10초 경과...)
+
+**After:**
+```
+Stage 2: Scan files
+Environment: NFS (nfs4) | Workers: 24
+[▓▓▓▓▓▓░░░░░░░░] Scanning folder 1/3: Games
+Found 1,247 files | Current: Super Mario Odyssey.nsp
+
+[████████████░░] Scanning folder 2/3: Updates
+Found 2,891 files | Current: Zelda BOTW v131072.nsp
+
+[██████████████] Scan complete: 4,523 files found
+```
+
+### 성공 기준
+- [✅] 파일 발견 개수 실시간 표시 (10개마다 업데이트)
+- [✅] 현재 스캔 중인 파일명 표시 (40자로 truncate)
+- [✅] 여러 폴더 스캔 시 폴더별 진행률
+- [✅] 네트워크 환경 정보 표시 (환경 타입 + 워커 수)
+
+### 구현 완료 (2025-10-21)
+
+**진행 상황 표시 개선:**
+1. `db/localSwitchFilesDB.go`
+   - `scanFolder()`: 파일 발견 수 실시간 카운팅 및 진행 상황 업데이트
+   - `CreateLocalSwitchFilesDB()`: 폴더별 진행 상황 표시 개선
+2. `pkg/scanner/scanner.go`
+   - `scanFiles()`: 환경 정보 및 워커 수 표시 추가
+
+**Phase 1 성능 최적화 (2025-10-22):**
+1. `pkg/scanner/output.go`
+   - 한국어 우선 설정을 Config에서 읽어오기 (`s.settings.LocalePriority`)
+2. `db/localSwitchFilesDB.go`
+   - 조기 필터링: 확장자 체크를 스캔 중 즉시 수행
+   - godirwalk 사용: 64KB 버퍼로 네트워크 I/O 최적화
+3. `go.mod`
+   - `github.com/karrick/godirwalk v1.17.0` 추가
+
+**성능 개선 결과:**
+- **시간**: 2-3분 → **26.7초** (약 **85% 단축!** ⚡)
+- **메모리**: 조기 필터링으로 불필요한 파일 제외 (1,491개 전체 파일 → 607개 게임 파일)
+- **한국어 지원**: Config의 locale_priority 반영 완료
+- **다국어 타이틀**: 한국어, 일본어, 영어 모두 정상 표시
+  - 예: "한국 드론 플라잉 투어 제주도", "팩맨 월드 2 리팩", "ボイスラブオンエア", "NekoRamen"
+- **진행 표시**: 실시간 파일 카운트 업데이트 (100/1491 → 1400/1491)
 
 ---
 

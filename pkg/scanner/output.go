@@ -7,10 +7,39 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/giwty/switch-library-manager/db"
-	"github.com/jedib0t/go-pretty/table"
+	"github.com/jedib0t/go-pretty/v6/table"
+	"github.com/jedib0t/go-pretty/v6/text"
 )
+
+// mapToKoreanTitle maps common English game titles to Korean
+func mapToKoreanTitle(englishTitle string) string {
+	// Clean up common suffixes
+	englishTitle = strings.TrimSuffix(englishTitle, " Base")
+	englishTitle = strings.TrimSuffix(englishTitle, " – Nintendo Switch 2 Edition")
+	englishTitle = strings.TrimSpace(englishTitle)
+
+	// Korean title mappings for popular games
+	koreanTitles := map[string]string{
+		"The Legend of Zelda Tears of the Kingdom": "젤다의 전설 티어스 오브 더 킹덤",
+		"The Legend of Zelda Breath of the Wild":   "젤다의 전설 브레스 오브 더 와일드",
+		"Super Mario Odyssey":                      "슈퍼 마리오 오디세이",
+		"Super Mario Bros Wonder":                  "슈퍼 마리오브라더스 원더",
+		"Pokemon Scarlet":                          "포켓몬스터 스칼렛",
+		"Pokemon Violet":                           "포켓몬스터 바이올렛",
+		"Animal Crossing New Horizons":             "모여봐요 동물의 숲",
+		"Little Nightmares II":                     "리틀 나이트메어 2",
+	}
+
+	if korean, exists := koreanTitles[englishTitle]; exists {
+		return korean
+	}
+
+	return englishTitle // Return original if no mapping found
+}
 
 // OutputFormat represents different output formats
 type OutputFormat string
@@ -35,12 +64,13 @@ type GameInfo struct {
 
 // MissingContentInfo represents missing content information
 type MissingContentInfo struct {
-	TitleID        string   `json:"title_id"`
-	Name           string   `json:"name"`
-	LocalVersion   int      `json:"local_version"`
-	LatestVersion  int      `json:"latest_version"`
-	MissingUpdates []int    `json:"missing_updates,omitempty"`
-	MissingDLC     []string `json:"missing_dlc,omitempty"`
+	TitleID          string   `json:"title_id"`
+	Name             string   `json:"name"`
+	LocalVersion     int      `json:"local_version"`
+	LatestVersion    int      `json:"latest_version"`
+	LatestUpdateDate string   `json:"latest_update_date,omitempty"`
+	MissingUpdates   []int    `json:"missing_updates,omitempty"`
+	MissingDLC       []string `json:"missing_dlc,omitempty"`
 }
 
 // ScanResult represents the complete scan result
@@ -88,10 +118,38 @@ func (s *Scanner) buildScanResult(localDB *db.LocalSwitchFilesDB, titlesDB *db.S
 			continue
 		}
 
-		// Get game name from titles DB
-		gameName := titleID
-		if title, exists := titlesDB.TitlesMap[titleID]; exists {
-			gameName = title.Attributes.Name
+		// Get game name - try multiple sources in priority order
+		gameName := titleID // fallback
+
+		// 1. Try to get from NACP metadata using configured locale priority
+		if gameFiles.File.Metadata.Ncap != nil {
+			// Get locale priority from config (fallback to default if not available)
+			localePriority := s.settings.LocalePriority
+			if len(localePriority) == 0 {
+				localePriority = []string{"KR.ko", "JP.ja", "US.en"}
+			}
+			if name := gameFiles.File.Metadata.Ncap.GetBestTitleName(localePriority); name != "" {
+				gameName = name
+			}
+		}
+
+		// 2. Try to get from title database
+		if gameName == titleID && titlesDB != nil && titlesDB.TitlesMap != nil {
+			if title, exists := titlesDB.TitlesMap[titleID]; exists && title.Attributes.Name != "" {
+				gameName = title.Attributes.Name
+			}
+		}
+
+		// 3. If nothing worked, try filename parsing with Korean mapping
+		if gameName == titleID {
+			fileName := gameFiles.File.ExtendedInfo.FileName
+			if idx := strings.Index(fileName, "["); idx != -1 {
+				extracted := strings.TrimSpace(fileName[:idx])
+				if extracted != "" {
+					// Try to map to Korean titles for common games
+					gameName = mapToKoreanTitle(extracted)
+				}
+			}
 		}
 
 		gameInfo := GameInfo{
@@ -136,11 +194,12 @@ func (s *Scanner) buildScanResult(localDB *db.LocalSwitchFilesDB, titlesDB *db.S
 				missingInfo.LocalVersion = int(gameFiles.File.Metadata.Version)
 			}
 
-			// Get latest version from titles DB
+			// Get latest version and update date from titles DB
 			if len(title.Updates) > 0 {
-				for version := range title.Updates {
+				for version, updateDate := range title.Updates {
 					if version > missingInfo.LatestVersion {
 						missingInfo.LatestVersion = version
+						missingInfo.LatestUpdateDate = updateDate
 					}
 				}
 			}
@@ -176,62 +235,178 @@ func (s *Scanner) buildScanResult(localDB *db.LocalSwitchFilesDB, titlesDB *db.S
 	return result
 }
 
+// truncateString truncates a string to maxLen characters (considering UTF-8 runes)
+func truncateString(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return string(runes[:maxLen])
+	}
+	return string(runes[:maxLen-3]) + "..."
+}
+
+// truncatePath truncates a file path for display
+func truncatePath(path string, maxLen int) string {
+	if utf8.RuneCountInString(path) <= maxLen {
+		return path
+	}
+
+	// Get filename
+	fileName := filepath.Base(path)
+
+	// If filename alone is too long, just show end of filename
+	if utf8.RuneCountInString(fileName) > maxLen-4 {
+		runes := []rune(fileName)
+		return "..." + string(runes[len(runes)-(maxLen-3):])
+	}
+
+	// Show .../ + filename
+	return ".../" + fileName
+}
+
 func (s *Scanner) outputTable(result *ScanResult) error {
-	// Games table
+	// Games table with old console.go style (80 column width)
 	t := table.NewWriter()
 	t.SetOutputMirror(os.Stdout)
-	t.AppendHeader(table.Row{"Title ID", "Name", "Version", "Updates", "DLC", "File Path"})
+	t.SetStyle(table.StyleLight)
 
-	for _, game := range result.Games {
+	// Configure column widths for 80 column display
+	t.SetColumnConfigs([]table.ColumnConfig{
+		{Number: 1, WidthMax: 3, Align: text.AlignRight},  // #
+		{Number: 2, WidthMax: 20},                         // Title
+		{Number: 3, WidthMax: 12},                         // TitleId
+		{Number: 4, WidthMax: 8},                          // Version
+		{Number: 5, WidthMax: 7, Align: text.AlignCenter}, // Updates
+		{Number: 6, WidthMax: 5, Align: text.AlignCenter}, // DLC
+		{Number: 7, WidthMax: 24},                         // File Path
+	})
+
+	t.AppendHeader(table.Row{"#", "Title", "TitleId", "Version", "Updates", "DLC", "File Path"})
+
+	for i, game := range result.Games {
 		baseStatus := "✗"
 		if game.HasBase {
 			baseStatus = "✓"
 		}
 
-		t.AppendRow(table.Row{
-			game.TitleID,
-			game.Name,
+		t.AppendRow([]interface{}{
+			i,
+			truncateString(game.Name, 20),
+			truncateString(game.TitleID, 12),
 			fmt.Sprintf("v%d %s", game.Version, baseStatus),
 			strconv.Itoa(game.UpdateCount),
 			strconv.Itoa(game.DLCCount),
-			game.FilePath,
+			truncatePath(game.FilePath, 24),
 		})
 	}
 
-	t.SetTitle("Game Library")
+	t.AppendFooter(table.Row{"", "", "", "", "", "Total", len(result.Games)})
 	t.Render()
 
-	// Missing content table
+	// Missing updates table
 	if len(result.MissingContent) > 0 {
-		fmt.Println()
-		mt := table.NewWriter()
-		mt.SetOutputMirror(os.Stdout)
-		mt.AppendHeader(table.Row{"Title ID", "Name", "Local Version", "Latest Version"})
+		hasUpdates := false
+		hasDLC := false
 
 		for _, missing := range result.MissingContent {
-			mt.AppendRow(table.Row{
-				missing.TitleID,
-				missing.Name,
-				fmt.Sprintf("v%d", missing.LocalVersion),
-				fmt.Sprintf("v%d", missing.LatestVersion),
-			})
+			if missing.LatestVersion > missing.LocalVersion {
+				hasUpdates = true
+			}
+			if len(missing.MissingDLC) > 0 {
+				hasDLC = true
+			}
 		}
 
-		mt.SetTitle("Missing Content")
-		mt.Render()
+		if hasUpdates {
+			fmt.Print("\nFound available updates:\n\n")
+			mt := table.NewWriter()
+			mt.SetOutputMirror(os.Stdout)
+			mt.SetStyle(table.StyleLight)
+
+			// Configure column widths
+			mt.SetColumnConfigs([]table.ColumnConfig{
+				{Number: 1, WidthMax: 3, Align: text.AlignRight},   // #
+				{Number: 2, WidthMax: 20},                          // Title
+				{Number: 3, WidthMax: 12},                          // TitleId
+				{Number: 4, WidthMax: 10, Align: text.AlignCenter}, // Local ver
+				{Number: 5, WidthMax: 10, Align: text.AlignCenter}, // Latest ver
+				{Number: 6, WidthMax: 12},                          // Date
+			})
+
+			mt.AppendHeader(table.Row{"#", "Title", "TitleId", "Local ver", "Latest ver", "Update Date"})
+
+			i := 0
+			for _, missing := range result.MissingContent {
+				if missing.LatestVersion > missing.LocalVersion {
+					mt.AppendRow([]interface{}{
+						i,
+						truncateString(missing.Name, 20),
+						truncateString(missing.TitleID, 12),
+						missing.LocalVersion,
+						missing.LatestVersion,
+						missing.LatestUpdateDate,
+					})
+					i++
+				}
+			}
+
+			mt.AppendFooter(table.Row{"", "", "", "", "Total", i})
+			mt.Render()
+		}
+
+		if hasDLC {
+			fmt.Print("\nFound missing DLCs:\n\n")
+			dt := table.NewWriter()
+			dt.SetOutputMirror(os.Stdout)
+			dt.SetStyle(table.StyleLight)
+
+			// Configure column widths
+			dt.SetColumnConfigs([]table.ColumnConfig{
+				{Number: 1, WidthMax: 3, Align: text.AlignRight}, // #
+				{Number: 2, WidthMax: 20},                        // Title
+				{Number: 3, WidthMax: 12},                        // TitleId
+				{Number: 4, WidthMax: 40},                        // Missing DLCs
+			})
+
+			dt.AppendHeader(table.Row{"#", "Title", "TitleId", "Missing DLCs"})
+
+			i := 0
+			for _, missing := range result.MissingContent {
+				if len(missing.MissingDLC) > 0 {
+					dt.AppendRow([]interface{}{
+						i,
+						truncateString(missing.Name, 20),
+						truncateString(missing.TitleID, 12),
+						strings.Join(missing.MissingDLC, "\n"),
+					})
+					i++
+				}
+			}
+
+			dt.AppendFooter(table.Row{"", "", "", "", "Total", i})
+			dt.Render()
+		}
 	}
 
-	// Summary
-	fmt.Printf("\nSummary:\n")
-	fmt.Printf("  Total Games: %d\n", result.Summary.TotalGames)
-	fmt.Printf("  Games with Base: %d\n", result.Summary.GamesWithBase)
-	fmt.Printf("  Games with Updates: %d\n", result.Summary.GamesWithUpdates)
-	fmt.Printf("  Games with DLC: %d\n", result.Summary.GamesWithDLC)
-	if result.Summary.MissingUpdates > 0 {
-		fmt.Printf("  Missing Updates: %d\n", result.Summary.MissingUpdates)
+	// Summary in old style format
+	fmt.Printf("\n")
+	if result.Summary.TotalGames > 0 {
+		fmt.Printf("Library status: %d games", result.Summary.TotalGames)
+		if result.Summary.GamesWithUpdates > 0 {
+			fmt.Printf(" (%d with updates)", result.Summary.GamesWithUpdates)
+		}
+		if result.Summary.GamesWithDLC > 0 {
+			fmt.Printf(" (%d with DLC)", result.Summary.GamesWithDLC)
+		}
+		fmt.Printf("\n")
 	}
-	if result.Summary.MissingDLC > 0 {
-		fmt.Printf("  Missing DLC: %d\n", result.Summary.MissingDLC)
+
+	if result.Summary.MissingUpdates > 0 || result.Summary.MissingDLC > 0 {
+		fmt.Printf("Missing content: %d updates, %d DLC\n", result.Summary.MissingUpdates, result.Summary.MissingDLC)
+	} else if result.Summary.TotalGames > 0 {
+		fmt.Printf("All NSP's are up to date!\n")
 	}
 
 	return nil
