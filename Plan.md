@@ -36,7 +36,195 @@ Switch Library Manager (SLM)를 현재의 GUI/Console 하이브리드 구조에�
 
 ---
 
-## 현재 작업: 파일 스캔 진행 상황 개선 (2025-10-21)
+## 현재 작업: scan과 조회(list) 기능 분리 (2025-10-22)
+
+### 문제점
+현재 `scan` 명령어가 스캔과 결과 출력을 동시에 수행하고 있어 다음과 같은 문제가 있습니다:
+
+1. **출력 가독성 문제**: 3000개 이상의 타이틀이 있는 경우 테이블이 너무 길어서 확인이 어려움
+2. **기능 혼재**: 스캔(DB 업데이트)과 조회(결과 확인)가 하나의 명령어에서 처리됨
+3. **재조회 불가**: 스캔 없이 기존 DB 내용만 조회하고 싶을 때 불편
+
+### 해결 방안: scan과 list 명령어 분리
+
+#### 1. `scan` 명령어 - 스캔 및 DB 업데이트
+**역할**: 게임 파일을 스캔하여 DB를 업데이트하는 것에 집중
+
+**출력 개선**:
+```
+$ slm-new scan -f /Volumes/roms/SWITCH
+
+Switch Library Manager
+
+[1/4] Download DBs
+[1/4] Download DBs (completed)
+[2/4] Scan files
+[2/4] Scan files 1234 files (completed)
+[3/4] Build library
+[3/4] Build library (completed)
+[4/4] Check missing
+[4/4] Check missing (completed)
+
+Summary:
+  Total games: 3,245
+  - Base games: 2,890
+  - Updates: 1,234
+  - DLC: 567
+
+  Missing content:
+  - Updates: 234 games
+  - DLC: 456 games
+
+Scan completed in 2m 34s
+Database updated: ~/.config/slm/cache/db/scan_XXXXXXXXX.db
+```
+
+**주요 변경사항**:
+- 기본적으로 테이블 출력 제거
+- 요약 정보만 표시 (총 게임 수, 업데이트/DLC 현황, 누락된 콘텐츠)
+- `--show-table` 플래그로 테이블 출력 옵션 제공 (짧은 리스트용)
+
+#### 2. `list` 명령어 - DB 조회 및 표시 (새로운 명령어)
+**역할**: 기존 DB를 조회하여 다양한 형태로 결과 표시
+
+**기본 사용법**:
+```bash
+# 전체 목록 조회 (페이징)
+$ slm-new list
+
+# 특정 조건 필터링
+$ slm-new list --missing-updates    # 업데이트가 없는 게임만
+$ slm-new list --missing-dlc         # DLC가 없는 게임만
+$ slm-new list --title "zelda"       # 제목 검색
+$ slm-new list --limit 20            # 상위 20개만
+
+# 다양한 출력 형식
+$ slm-new list --format table        # 테이블 형식 (기본)
+$ slm-new list --format json         # JSON 형식
+$ slm-new list --format csv          # CSV 형식
+
+# 정렬
+$ slm-new list --sort title          # 제목순
+$ slm-new list --sort title-id       # TitleID순
+$ slm-new list --sort missing        # 누락된 콘텐츠 많은 순
+
+# 페이징
+$ slm-new list --page 2 --per-page 50
+```
+
+**구현 계획**:
+
+1. **새로운 파일 생성**: `cmd/list.go`
+   ```go
+   package cmd
+
+   var listCmd = &cobra.Command{
+       Use:   "list",
+       Short: "List games from the database",
+       Long:  "Query and display games from the local database with various filters and formats",
+       Run:   runList,
+   }
+
+   func init() {
+       rootCmd.AddCommand(listCmd)
+
+       // Filters
+       listCmd.Flags().Bool("missing-updates", false, "Show only games missing updates")
+       listCmd.Flags().Bool("missing-dlc", false, "Show only games missing DLC")
+       listCmd.Flags().StringP("title", "t", "", "Filter by title (case-insensitive substring match)")
+       listCmd.Flags().StringP("title-id", "i", "", "Filter by title ID")
+       listCmd.Flags().IntP("limit", "l", 0, "Limit number of results (0 = no limit)")
+
+       // Sorting
+       listCmd.Flags().StringP("sort", "s", "title", "Sort by: title|title-id|missing")
+
+       // Pagination
+       listCmd.Flags().Int("page", 1, "Page number (starts from 1)")
+       listCmd.Flags().Int("per-page", 50, "Results per page")
+
+       // Output format
+       listCmd.Flags().StringP("format", "f", "table", "Output format: table|json|csv")
+   }
+   ```
+
+2. **DB 조회 함수 추가**: `db/localSwitchFilesDB.go`
+   ```go
+   type ListOptions struct {
+       MissingUpdates bool
+       MissingDLC     bool
+       TitleFilter    string
+       TitleIDFilter  string
+       Limit          int
+       SortBy         string
+       Page           int
+       PerPage        int
+   }
+
+   func (ldb *LocalSwitchDBManager) ListGames(opts ListOptions) ([]*SwitchGameFiles, error) {
+       // DB에서 게임 목록 조회
+       // 필터 적용
+       // 정렬
+       // 페이징
+       return games, nil
+   }
+   ```
+
+3. **`scan` 명령어 수정**: `cmd/scan.go`
+   ```go
+   // --show-table 플래그 추가
+   scanCmd.Flags().Bool("show-table", false, "Show full table after scan (not recommended for large libraries)")
+
+   // 기본 동작: 요약만 표시
+   // --show-table 사용 시에만 테이블 출력
+   ```
+
+#### 3. 추가 편의 기능
+
+**stats 명령어** (옵션):
+```bash
+$ slm-new stats
+
+Switch Library Statistics
+========================
+Total Games: 3,245
+  - Base games: 2,890
+  - Updates: 1,234
+  - DLC: 567
+
+Missing Content:
+  - Games missing updates: 234 (8.1%)
+  - Games missing DLC: 456 (15.8%)
+
+Top 5 Games with Most DLC:
+  1. Pokemon Sword/Shield - 24 DLC
+  2. Fire Emblem Three Houses - 18 DLC
+  3. Animal Crossing - 15 DLC
+  ...
+
+Storage:
+  Total size: 1.2 TB
+  Average game size: 4.3 GB
+```
+
+### 작업 순서
+
+1. ✅ 진행 상황 표시 문제 해결 (go-expert에게 위임)
+2. `list` 명령어 구현
+   - [ ] `cmd/list.go` 생성
+   - [ ] DB 조회 함수 구현
+   - [ ] 필터링 로직 구현
+   - [ ] 페이징 구현
+3. `scan` 명령어 수정
+   - [ ] 기본 출력을 요약으로 변경
+   - [ ] `--show-table` 플래그 추가
+4. 테스트 및 문서 업데이트
+   - [ ] 각 명령어 테스트
+   - [ ] README 업데이트
+   - [ ] CLAUDE.md 업데이트
+
+---
+
+## 이전 작업: 파일 스캔 진행 상황 개선 (2025-10-21)
 
 ### 문제점
 네트워크 파일 시스템에서 파일 탐색 시 진행 상황이 불명확:

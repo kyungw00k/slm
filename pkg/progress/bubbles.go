@@ -176,15 +176,15 @@ func (s *SimpleProgressUpdater) UpdateProgress(stage int, current, total int, me
 	}
 
 	// Show progress updates
-	if total > 0 && current > 0 && current%100 == 0 {
-		// Show percentage for stages with known totals
+	if total > 0 && current > 0 && current%10 == 0 {
+		// Show percentage for stages with known totals (every 10 items)
 		percentage := float64(current) / float64(total) * 100
-		fmt.Printf("\r[%d/%d] %s %d/%d (%.0f%%)", stage+1, len(s.stages), s.stages[stage].Name, current, total, percentage)
-	} else if message != "" && current >= 0 && total <= 0 {
-		// Show count for discovery stages (unknown total)
-		if current > 0 {
-			fmt.Printf("\r[%d/%d] %s %d files", stage+1, len(s.stages), s.stages[stage].Name, current)
-		}
+		fmt.Fprintf(os.Stderr, "\r[%d/%d] %s %d/%d (%.0f%%)", stage+1, len(s.stages), s.stages[stage].Name, current, total, percentage)
+		os.Stderr.Sync() // Force flush
+	} else if current > 0 && total <= 0 {
+		// Show count for discovery stages (unknown total) - every item
+		fmt.Fprintf(os.Stderr, "\r[%d/%d] %s %d files", stage+1, len(s.stages), s.stages[stage].Name, current)
+		os.Stderr.Sync() // Force flush
 	}
 	return nil
 }

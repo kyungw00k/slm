@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/giwty/switch-library-manager/fileio"
 	"github.com/giwty/switch-library-manager/settings"
@@ -307,10 +308,10 @@ func (ldb *LocalSwitchDBManager) scanFoldersParallelStreaming(
 	// WaitGroup for folder scanning goroutines
 	var scanWg sync.WaitGroup
 
-	// Thread-safe counters
+	// Thread-safe counters (using atomic operations)
 	var totalFilesFound int64
 	var processedFiles int64
-	var counterMu sync.Mutex
+	var lastDisplayedMilestone int64 // Track last milestone shown in progress
 
 	// Thread-safe maps
 	var mapMu sync.Mutex
@@ -321,21 +322,8 @@ func (ldb *LocalSwitchDBManager) scanFoldersParallelStreaming(
 		go func(folderIdx int, folderPath string) {
 			defer scanWg.Done()
 
-			// Update progress for this folder
-			if progress != nil {
-				folderName := filepath.Base(folderPath)
-				if len(folderName) > 50 {
-					runes := []rune(folderName)
-					if len(runes) > 50 {
-						folderName = string(runes[:47]) + "..."
-					}
-				}
-				progress.UpdateProgress(folderIdx, len(folders),
-					fmt.Sprintf("scanning folder %d/%d: %s", folderIdx+1, len(folders), folderName))
-			}
-
 			// Scan folder and collect errors
-			err := ldb.scanFolderStreaming(folderPath, recursive, filesChan, progress, folderIdx, len(folders), &totalFilesFound, &counterMu, scanErrors)
+			err := ldb.scanFolderStreaming(folderPath, recursive, filesChan, progress, folderIdx, len(folders), &totalFilesFound, &lastDisplayedMilestone, scanErrors)
 			if err != nil {
 				scanErrors.AddFolderError(folderPath, err)
 				zap.S().Errorf("Error scanning folder %s: %v", folderPath, err)
@@ -363,10 +351,8 @@ func (ldb *LocalSwitchDBManager) scanFoldersParallelStreaming(
 	done := make(chan bool)
 	go func() {
 		for result := range results {
-			counterMu.Lock()
-			processedFiles++
-			current := processedFiles
-			counterMu.Unlock()
+			// Atomically increment processed files counter
+			current := atomic.AddInt64(&processedFiles, 1)
 
 			// Update progress
 			if progress != nil && (current%10 == 0 || current == 1) {
@@ -437,7 +423,7 @@ func (ldb *LocalSwitchDBManager) scanFolderStreaming(
 	folderIdx int,
 	totalFolders int,
 	totalFilesFound *int64,
-	counterMu *sync.Mutex,
+	lastDisplayedMilestone *int64,
 	scanErrors *ScanErrors) error {
 
 	localFilesFound := 0
@@ -513,17 +499,38 @@ func (ldb *LocalSwitchDBManager) scanFolderStreaming(
 			localFilesFound++
 
 			// Update total counter atomically
-			if totalFilesFound != nil && counterMu != nil {
-				counterMu.Lock()
-				*totalFilesFound++
-				counterMu.Unlock()
+			var currentTotal int64
+			if totalFilesFound != nil {
+				currentTotal = atomic.AddInt64(totalFilesFound, 1)
+			} else {
+				currentTotal = int64(localFilesFound)
 			}
 
-			// Update progress periodically
-			if progress != nil && (localFilesFound%10 == 0 || localFilesFound == 1) {
-				displayName := truncateUTF8(name, 40)
-				progress.UpdateProgress(localFilesFound, 0,
-					fmt.Sprintf("[folder %d/%d] %s", folderIdx+1, totalFolders, displayName))
+			// Update progress at milestones, ensuring each milestone is displayed exactly once
+			// Use atomic compare-and-swap to claim the milestone
+			if progress != nil && lastDisplayedMilestone != nil {
+				// Calculate current milestone (1, 10, 20, 30, ...)
+				var milestone int64
+				if currentTotal == 1 {
+					milestone = 1
+				} else if currentTotal%10 == 0 {
+					milestone = currentTotal
+				}
+
+				// If we have a milestone to display, try to claim it atomically
+				if milestone > 0 {
+					lastDisplayed := atomic.LoadInt64(lastDisplayedMilestone)
+					// Only update if this milestone hasn't been displayed yet
+					if milestone > lastDisplayed {
+						// Try to claim this milestone using compare-and-swap
+						if atomic.CompareAndSwapInt64(lastDisplayedMilestone, lastDisplayed, milestone) {
+							// We successfully claimed this milestone, update progress
+							displayName := truncateUTF8(name, 40)
+							progress.UpdateProgress(int(currentTotal), 0,
+								fmt.Sprintf("scanning: %s", displayName))
+						}
+					}
+				}
 			}
 
 			return nil
