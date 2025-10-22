@@ -133,7 +133,7 @@ func (s *Scanner) buildScanResult(localDB *db.LocalSwitchFilesDB, titlesDB *db.S
 			// Get locale priority from config (fallback to default if not available)
 			localePriority := s.settings.LocalePriority
 			if len(localePriority) == 0 {
-				localePriority = []string{"KR.ko", "JP.ja", "US.en"}
+				localePriority = []string{"KR.ko", "US.en", "JP.ja"}
 			}
 			if name := gameFiles.File.Metadata.Ncap.GetBestTitleName(localePriority); name != "" {
 				gameName = name

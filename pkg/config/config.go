@@ -132,7 +132,7 @@ func (m *Manager) createDefaultConfig() *settings.AppSettings {
 		ScanRecursively:        true,
 		GuiPagingSize:          100,
 		IgnoreDLCTitleIds:      []string{},
-		LocalePriority:         []string{"KR.ko", "JP.ja", "US.en"},
+		LocalePriority:         []string{"KR.ko", "US.en", "JP.ja"},
 		TitleDBUrls:            map[string]string{},
 		TitlesETags:            map[string]string{
 			"KR.ko": "",

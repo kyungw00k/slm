@@ -89,7 +89,7 @@ func CreateSwitchTitleDB(titlesFile, versionsFile io.Reader) (*SwitchTitlesDB, e
 }
 
 // CreateSwitchTitleDBMultiLang creates a SwitchTitlesDB by merging multiple title files in priority order.
-// The first file in titleFiles has the highest priority (e.g., KR.ko), followed by subsequent files (JP.ja, US.en).
+// The first file in titleFiles has the highest priority (e.g., KR.ko), followed by subsequent files (US.en, JP.ja).
 // Titles from higher priority files will override those from lower priority files.
 func CreateSwitchTitleDBMultiLang(titleFiles []io.Reader, versionsFile io.Reader) (*SwitchTitlesDB, error) {
 	if len(titleFiles) == 0 {

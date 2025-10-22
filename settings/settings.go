@@ -82,7 +82,7 @@ func ReadSettings(baseFolder string) *AppSettings {
 	}
 	settingsInstance = &AppSettings{Debug: false, GuiPagingSize: 100, ScanFolders: []string{},
 		OrganizeOptions: OrganizeOptions{SwitchSafeFileNames: true}, Prodkeys: "", IgnoreDLCTitleIds: []string{"01007F600B135007"},
-		LocalePriority: []string{"KR.ko", "JP.ja", "US.en"},
+		LocalePriority: []string{"KR.ko", "US.en", "JP.ja"},
 		TitleDBUrls:    map[string]string{},
 		TitlesETags: map[string]string{
 			"KR.ko": "",
@@ -115,7 +115,7 @@ func saveDefaultSettings(baseFolder string) *AppSettings {
 		CheckForMissingDLC:     true,
 		ScanRecursively:        true,
 		Debug:          false,
-		LocalePriority: []string{"KR.ko", "JP.ja", "US.en"},
+		LocalePriority: []string{"KR.ko", "US.en", "JP.ja"},
 		TitleDBUrls:    map[string]string{},
 		TitlesETags: map[string]string{
 			"KR.ko": "",

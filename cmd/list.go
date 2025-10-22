@@ -223,7 +223,7 @@ func findDB(configMgr *config.Manager, scanPath string) (string, error) {
 // loadTitlesDB loads the titles database with multi-language support
 func loadTitlesDB(configMgr *config.Manager) (*db.SwitchTitlesDB, error) {
 	titleDBDir := configMgr.GetTitleDBDir()
-	localePriority := []string{"KR.ko", "JP.ja", "US.en"}
+	localePriority := []string{"KR.ko", "US.en", "JP.ja"}
 
 	// Load all available title files in priority order
 	var titleFiles []*os.File

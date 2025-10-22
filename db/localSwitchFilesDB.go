@@ -1206,7 +1206,7 @@ func (ldb *LocalSwitchDBManager) ListGames(opts ListOptions, titlesDB *SwitchTit
 
 			// Try to get name from metadata
 			if gameFiles.File.Metadata != nil && gameFiles.File.Metadata.Ncap != nil {
-				localePriority := []string{"KR.ko", "JP.ja", "US.en"}
+				localePriority := []string{"KR.ko", "US.en", "JP.ja"}
 				if name := gameFiles.File.Metadata.Ncap.GetBestTitleName(localePriority); name != "" {
 					titleName = name
 				}
