@@ -209,18 +209,42 @@ Storage:
 ### 작업 순서
 
 1. ✅ 진행 상황 표시 문제 해결 (go-expert에게 위임)
-2. `list` 명령어 구현
-   - [ ] `cmd/list.go` 생성
-   - [ ] DB 조회 함수 구현
-   - [ ] 필터링 로직 구현
-   - [ ] 페이징 구현
-3. `scan` 명령어 수정
-   - [ ] 기본 출력을 요약으로 변경
-   - [ ] `--show-table` 플래그 추가
-4. 테스트 및 문서 업데이트
-   - [ ] 각 명령어 테스트
-   - [ ] README 업데이트
-   - [ ] CLAUDE.md 업데이트
+   - ✅ atomic CAS 패턴으로 중복 업데이트 방지
+   - ✅ stderr 출력 및 명시적 버퍼 flush
+   - ✅ 테스트 코드 작성 및 검증
+
+2. ✅ `list` 명령어 구현
+   - ✅ `cmd/list.go` 생성
+   - ✅ DB 조회 함수 구현 (ListGames)
+   - ✅ 필터링 로직 구현 (title, title-id, missing-updates, missing-dlc)
+   - ✅ 페이징 구현 (page, per-page)
+   - ✅ 정렬 지원 (title, title-id, missing)
+   - ✅ 자동 DB 탐지 (가장 최근 DB)
+   - ✅ --scan-path 옵션 추가
+
+3. ✅ `scan` 명령어 수정
+   - ✅ 기본 출력을 요약으로 변경
+   - ✅ `--show-table` 플래그 추가
+   - ✅ 요약 정보 출력 (게임 수, 업데이트/DLC, 누락 콘텐츠)
+
+4. ✅ 테스트 및 문서 업데이트
+   - ✅ 각 명령어 테스트 (빈 DB, 필터, 페이징, JSON/CSV)
+   - ✅ CLAUDE.md 업데이트
+   - [ ] README 업데이트 (나중에)
+
+### 완료 (2025-10-22)
+
+모든 작업이 완료되었습니다!
+
+**주요 개선사항**:
+- 진행 상황 표시: atomic CAS 패턴으로 들쭉날쭉한 숫자 문제 해결
+- scan/list 분리: 대용량 라이브러리에서 깔끔한 UX 제공
+- 다양한 필터/정렬 옵션으로 유연한 조회 가능
+- JSON/CSV 출력으로 스크립팅 지원
+
+**커밋**:
+- `40190b2` - perf: fix duplicate progress updates using atomic CAS pattern
+- `a3a9a86` - feat: separate scan and list commands for better UX
 
 ---
 
