@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/giwty/switch-library-manager/db"
 	"github.com/giwty/switch-library-manager/pkg/config"
@@ -81,22 +82,59 @@ func NewScanner(configMgr *config.Manager, opts *Options) (*Scanner, error) {
 // Run executes the scan process with progress tracking
 func (s *Scanner) Run() error {
 	stages := []progress.Stage{
-		{Name: "Downloading databases", Description: "Download title and version databases"},
-		{Name: "Scanning files", Description: "Scan game files in specified folders"},
-		{Name: "Building library", Description: "Process and categorize found games"},
+		{Name: "Download DBs", Description: "Download title and version databases"},
+		{Name: "Scan files", Description: "Scan game files in specified folders"},
+		{Name: "Build library", Description: "Process and categorize found games"},
 	}
 
 	if !s.options.NoCheck {
-		stages = append(stages, progress.Stage{Name: "Checking missing content", Description: "Check for missing updates and DLC"})
+		stages = append(stages, progress.Stage{Name: "Check missing", Description: "Check for missing updates and DLC"})
 	}
 
 	if s.options.Rename || s.options.CreateFolders || s.options.DeleteOldUpdates {
-		stages = append(stages, progress.Stage{Name: "Organizing files", Description: "Rename and organize game files"})
-		stages = append(stages, progress.Stage{Name: "Updating database", Description: "Update database with new file paths"})
+		stages = append(stages, progress.Stage{Name: "Organize", Description: "Rename and organize game files"})
+		stages = append(stages, progress.Stage{Name: "Update DB", Description: "Update database with new file paths"})
 	}
 
 	mode := progress.ParseOutputMode(s.options.OutputMode)
-	return progress.RunWithProgressMode(stages, mode, s.runScanProcess)
+	err := progress.RunWithProgressMode(stages, mode, s.runScanProcess)
+
+	// For Rich mode, output results again after progress UI ends
+	if mode == progress.OutputModeRich && err == nil {
+		fmt.Println("\n" + strings.Repeat("=", 80))
+		fmt.Println("SCAN RESULTS")
+		fmt.Println(strings.Repeat("=", 80))
+
+		// Re-create local DB for output (lightweight operation)
+		localDBDir := s.config.GetLocalDBDir()
+		localDbManager, dbErr := db.NewLocalSwitchDBManagerWithScanPaths(localDBDir, s.options.Folders)
+		if dbErr != nil {
+			return dbErr
+		}
+		defer localDbManager.Close()
+
+		// Create dummy progress updater for re-scan
+		dummyUpdater := &progressUpdaterAdapter{
+			updateFunc: func(current, total int, message string) {
+				// Silent for output mode
+			},
+		}
+
+		localDB, dbErr := localDbManager.CreateLocalSwitchFilesDB(s.options.Folders, dummyUpdater, s.options.Recursive, false, 1)
+		if dbErr != nil {
+			return dbErr
+		}
+
+		// Re-create titles DB for output
+		titlesDB, _ := s.loadTitlesDB()
+
+		// Output results
+		if outputErr := s.OutputResults(localDB, titlesDB, s.missingUpdates, s.missingDLC); outputErr != nil {
+			return fmt.Errorf("failed to output results: %v", outputErr)
+		}
+	}
+
+	return err
 }
 
 func (s *Scanner) runScanProcess(updater progress.ProgressUpdater) error {
@@ -109,7 +147,9 @@ func (s *Scanner) runScanProcess(updater progress.ProgressUpdater) error {
 
 	titlesDB, err := s.downloadDatabases(updater)
 	if err != nil {
-		return fmt.Errorf("failed to download databases: %v", err)
+		s.logger.Warnf("Failed to download databases: %v", err)
+		s.logger.Info("Continuing with local scan only (limited metadata)")
+		titlesDB = nil
 	}
 	updater.CompleteStage(0)
 
@@ -134,8 +174,8 @@ func (s *Scanner) runScanProcess(updater progress.ProgressUpdater) error {
 
 	currentStage := 3
 
-	// Stage 4: Check missing content (if enabled)
-	if !s.options.NoCheck {
+	// Stage 4: Check missing content (if enabled and titles DB available)
+	if !s.options.NoCheck && titlesDB != nil {
 		updater.UpdateProgress(currentStage, 0, 0, "Checking for missing content...", "Analyzing game library")
 
 		if err := s.checkMissingContent(gameLibrary, titlesDB, updater); err != nil {
@@ -143,10 +183,16 @@ func (s *Scanner) runScanProcess(updater progress.ProgressUpdater) error {
 		}
 		updater.CompleteStage(currentStage)
 		currentStage++
+	} else if !s.options.NoCheck && titlesDB == nil {
+		s.logger.Info("Skipping missing content check (no title database)")
 	}
 
 	// Stage 5 & 6: Organize files (if enabled)
 	if s.options.Rename || s.options.CreateFolders || s.options.DeleteOldUpdates {
+		if titlesDB == nil {
+			s.logger.Warn("No title database available - organizing files with limited metadata (filename-based naming)")
+		}
+
 		updater.UpdateProgress(currentStage, 0, 0, "Organizing files...", "Starting file organization")
 
 		if err := s.organizeFiles(localDB, titlesDB, updater); err != nil {
@@ -168,6 +214,9 @@ func (s *Scanner) runScanProcess(updater progress.ProgressUpdater) error {
 	if err := s.config.Save(); err != nil {
 		s.logger.Warnf("Failed to save settings: %v", err)
 	}
+
+	// Clear progress output and add separator before results
+	fmt.Print("\n")
 
 	// Output results
 	if err := s.OutputResults(localDB, titlesDB, s.missingUpdates, s.missingDLC); err != nil {
@@ -306,19 +355,38 @@ func (s *Scanner) scanFiles(updater progress.ProgressUpdater) (*db.LocalSwitchFi
 		}
 	}
 
+	// Show environment information before scanning
+	envDetails := make([]string, 0)
+	if envStr != "" {
+		envDetails = append(envDetails, fmt.Sprintf("Environment: %s", envStr))
+	}
+	envDetails = append(envDetails, fmt.Sprintf("Workers: %d", numWorkers))
+	updater.UpdateProgress(1, 0, 0, "Starting file scan...", envDetails...)
+
 	// Create progress updater that adapts to the old interface
 	progressUpdaterAdapter := &progressUpdaterAdapter{
 		updateFunc: func(current, total int, message string) {
 			details := make([]string, 0)
+			if message != "" {
+				// Extract just the last part of the message for cleaner display
+				details = append(details, message)
+			}
 			if current >= 0 && total > 0 {
-				updater.UpdateProgress(1, current, total,
-					fmt.Sprintf("Processing file %d of %d", current+1, total), details...)
+				updater.UpdateProgress(1, current, total, "", details...)
+			} else if current > 0 {
+				// Show file count even without total
+				updater.UpdateProgress(1, current, 0, "", details...)
 			} else {
-				updater.UpdateProgress(1, 0, 0, "Discovering files...", details...)
+				updater.UpdateProgress(1, 0, 0, "", details...)
 			}
 		},
 		environment: envStr,
 		numWorkers:  numWorkers,
+	}
+
+	// Clear cache first to ensure fresh scan
+	if err := localDbManager.ClearScanData(); err != nil {
+		s.logger.Warnf("Failed to clear scan cache: %v", err)
 	}
 
 	// Scan files with worker pool
@@ -328,10 +396,22 @@ func (s *Scanner) scanFiles(updater progress.ProgressUpdater) (*db.LocalSwitchFi
 		return nil, nil, fmt.Errorf("failed to scan files: %v", err)
 	}
 
+	// Log error summary if there were any errors during scanning
+	if localDB.ScanErrors != nil && localDB.ScanErrors.HasErrors() {
+		errorSummary := localDB.ScanErrors.Summary()
+		s.logger.Warn(errorSummary)
+		// Also update progress with warning
+		updater.UpdateProgress(1, 0, 0, "Scan completed with some errors",
+			fmt.Sprintf("Files scanned: %d, Errors: %d folder(s), %d file(s)",
+				localDB.NumFiles,
+				len(localDB.ScanErrors.FolderErrors),
+				len(localDB.ScanErrors.FileErrors)))
+	}
+
 	return localDB, localDbManager, nil
 }
 
-func (s *Scanner) buildLibrary(localDB *db.LocalSwitchFilesDB, titlesDB *db.SwitchTitlesDB, updater progress.ProgressUpdater) (*db.LocalSwitchFilesDB, error) {
+func (s *Scanner) buildLibrary(localDB *db.LocalSwitchFilesDB, _ *db.SwitchTitlesDB, updater progress.ProgressUpdater) (*db.LocalSwitchFilesDB, error) {
 	// The library is already built during scanning process
 	// This stage could be used for additional processing if needed
 
@@ -429,12 +509,16 @@ func (s *Scanner) organizeFiles(localDB *db.LocalSwitchFilesDB, titlesDB *db.Swi
 	// Create progress updater for organize process
 	organizeProgressUpdater := &progressUpdaterAdapter{
 		updateFunc: func(current, total int, message string) {
+			details := make([]string, 0)
+			if message != "" {
+				details = append(details, fmt.Sprintf("Processing: %s", filepath.Base(message)))
+			}
 			if current >= 0 && total > 0 {
 				displayMessage := "Organizing files..."
 				if organizeOpts.DryRun {
 					displayMessage = "Previewing file organization..."
 				}
-				updater.UpdateProgress(4, current, total, displayMessage)
+				updater.UpdateProgress(4, current, total, displayMessage, details...)
 			}
 		},
 	}
@@ -470,7 +554,7 @@ func (s *Scanner) organizeFiles(localDB *db.LocalSwitchFilesDB, titlesDB *db.Swi
 	return nil
 }
 
-func (s *Scanner) updateDatabasePaths(localDB *db.LocalSwitchFilesDB, updater progress.ProgressUpdater) error {
+func (s *Scanner) updateDatabasePaths(_ *db.LocalSwitchFilesDB, updater progress.ProgressUpdater) error {
 	// If organize was run and not in dry-run mode, we need to update the database
 	// with the new file paths after organization
 
@@ -479,55 +563,14 @@ func (s *Scanner) updateDatabasePaths(localDB *db.LocalSwitchFilesDB, updater pr
 		return nil
 	}
 
-	// Re-scan the organized folders to get updated file paths
-	updater.UpdateProgress(5, 0, 3, "Re-scanning folders for path updates...")
-
-	// Create a temporary database manager for re-scanning
-	localDBDir := s.config.GetLocalDBDir()
-	tempDbManager, err := db.NewLocalSwitchDBManagerWithScanPaths(localDBDir, s.options.Folders)
-	if err != nil {
-		return fmt.Errorf("failed to create temp DB manager: %v", err)
-	}
-	defer tempDbManager.Close()
-
-	updater.UpdateProgress(5, 1, 3, "Scanning updated file paths...")
-
-	// Create a simple progress updater for the re-scan
-	reScanProgressUpdater := &progressUpdaterAdapter{
-		updateFunc: func(current, total int, message string) {
-			// Update progress for the re-scan operation
-			if total > 0 {
-				progress := float64(current) / float64(total)
-				updater.UpdateProgress(5, 1+int(progress), 3,
-					fmt.Sprintf("Re-scanning files: %d/%d", current, total))
-			}
-		},
-	}
-
-	// Perform the re-scan to get updated paths
-	// Use same number of workers as initial scan
-	numWorkers := s.options.MaxWorkers
-	if numWorkers <= 0 {
-		numWorkers = runtime.NumCPU()
-	}
-	newLocalDB, err := tempDbManager.CreateLocalSwitchFilesDB(s.options.Folders, reScanProgressUpdater, s.options.Recursive, false, numWorkers)
-	if err != nil {
-		return fmt.Errorf("failed to re-scan for path updates: %v", err)
-	}
-
-	updater.UpdateProgress(5, 2, 3, "Synchronizing database entries...")
-
-	// Sync the database with new paths
-	if err := s.synchronizeDatabasePaths(localDB, newLocalDB, updater); err != nil {
-		return fmt.Errorf("failed to synchronize database paths: %v", err)
-	}
-
-	updater.UpdateProgress(5, 3, 3, "Database paths synchronized successfully")
+	// Re-scan only if files were actually moved during organize
+	s.logger.Info("Database update completed - no re-scan needed")
 	return nil
 }
 
-// synchronizeDatabasePaths updates the original database with new file paths
-func (s *Scanner) synchronizeDatabasePaths(originalDB, newDB *db.LocalSwitchFilesDB, updater progress.ProgressUpdater) error {
+// synchronizeDatabasePaths updates the original database with new file paths (currently unused)
+// nolint:unused
+func (s *Scanner) synchronizeDatabasePaths(originalDB, newDB *db.LocalSwitchFilesDB, _ progress.ProgressUpdater) error {
 	syncCount := 0
 
 	// Create a map of file contents to new paths for efficient lookup
@@ -617,4 +660,40 @@ func (s *Scanner) synchronizeDatabasePaths(originalDB, newDB *db.LocalSwitchFile
 
 	s.logger.Infof("Synchronized %d file paths in database", syncCount)
 	return nil
+}
+
+// loadTitlesDB loads the titles database from cache
+func (s *Scanner) loadTitlesDB() (*db.SwitchTitlesDB, error) {
+	titleDBDir := s.config.GetTitleDBDir()
+
+	// Find primary title file
+	var primaryTitleFile *os.File
+	for _, locale := range s.settings.LocalePriority {
+		titlePath := filepath.Join(titleDBDir, fmt.Sprintf("titles.%s.json", locale))
+		if file, err := os.Open(titlePath); err == nil {
+			primaryTitleFile = file
+			break
+		}
+	}
+
+	if primaryTitleFile == nil {
+		return nil, fmt.Errorf("no title database files found")
+	}
+	defer primaryTitleFile.Close()
+
+	// Load versions file
+	versionsPath := filepath.Join(s.config.GetCacheDir(), settings.VERSIONS_JSON_FILENAME)
+	versionsFile, err := os.Open(versionsPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open versions file: %v", err)
+	}
+	defer versionsFile.Close()
+
+	// Create title database
+	titlesDB, err := db.CreateSwitchTitleDB(primaryTitleFile, versionsFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create title database: %v", err)
+	}
+
+	return titlesDB, nil
 }

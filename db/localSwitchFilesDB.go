@@ -86,10 +86,89 @@ type SkippedFile struct {
 	AdditionalInfo string
 }
 
+// ScanErrors collects errors that occurred during scanning
+type ScanErrors struct {
+	FolderErrors map[string]error // folder path -> error
+	FileErrors   []FileError      // individual file errors
+	mu           sync.Mutex
+}
+
+// FileError represents an error that occurred while processing a file
+type FileError struct {
+	FilePath string
+	Error    error
+	Stage    string // "scan", "process", "metadata"
+}
+
+// AddFolderError records an error for a specific folder
+func (se *ScanErrors) AddFolderError(folder string, err error) {
+	se.mu.Lock()
+	defer se.mu.Unlock()
+	if se.FolderErrors == nil {
+		se.FolderErrors = make(map[string]error)
+	}
+	se.FolderErrors[folder] = err
+}
+
+// AddFileError records an error for a specific file
+func (se *ScanErrors) AddFileError(filePath, stage string, err error) {
+	se.mu.Lock()
+	defer se.mu.Unlock()
+	se.FileErrors = append(se.FileErrors, FileError{
+		FilePath: filePath,
+		Error:    err,
+		Stage:    stage,
+	})
+}
+
+// HasErrors returns true if any errors were collected
+func (se *ScanErrors) HasErrors() bool {
+	se.mu.Lock()
+	defer se.mu.Unlock()
+	return len(se.FolderErrors) > 0 || len(se.FileErrors) > 0
+}
+
+// Summary generates a human-readable summary of errors
+func (se *ScanErrors) Summary() string {
+	se.mu.Lock()
+	defer se.mu.Unlock()
+
+	if !se.HasErrors() {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("\nScan completed with %d folder errors and %d file errors\n",
+		len(se.FolderErrors), len(se.FileErrors)))
+
+	if len(se.FolderErrors) > 0 {
+		sb.WriteString("\nFolder errors:\n")
+		for folder, err := range se.FolderErrors {
+			sb.WriteString(fmt.Sprintf("  - %s: %v\n", folder, err))
+		}
+	}
+
+	if len(se.FileErrors) > 0 && len(se.FileErrors) <= 10 {
+		sb.WriteString("\nFile errors:\n")
+		for _, fe := range se.FileErrors {
+			sb.WriteString(fmt.Sprintf("  - %s (%s): %v\n", fe.FilePath, fe.Stage, fe.Error))
+		}
+	} else if len(se.FileErrors) > 10 {
+		sb.WriteString(fmt.Sprintf("\n%d file errors (showing first 10):\n", len(se.FileErrors)))
+		for i := 0; i < 10; i++ {
+			fe := se.FileErrors[i]
+			sb.WriteString(fmt.Sprintf("  - %s (%s): %v\n", fe.FilePath, fe.Stage, fe.Error))
+		}
+	}
+
+	return sb.String()
+}
+
 type LocalSwitchFilesDB struct {
-	TitlesMap map[string]*SwitchGameFiles
-	Skipped   map[ExtendedFileInfo]SkippedFile
-	NumFiles  int
+	TitlesMap   map[string]*SwitchGameFiles
+	Skipped     map[ExtendedFileInfo]SkippedFile
+	NumFiles    int
+	ScanErrors  *ScanErrors // Errors encountered during scanning
 }
 
 // FileJob represents a file to be processed by a worker
@@ -126,6 +205,7 @@ func (ldb *LocalSwitchDBManager) CreateLocalSwitchFilesDB(folders []string,
 	}
 
 	// Always scan if ignoreCache is true or if no titles found
+	var scanErrors *ScanErrors
 	if ignoreCache || len(titles) == 0 {
 		// Reset collections for fresh scan when ignoring cache
 		if ignoreCache {
@@ -135,7 +215,8 @@ func (ldb *LocalSwitchDBManager) CreateLocalSwitchFilesDB(folders []string,
 		}
 
 		// Use parallel folder scanning with streaming pipeline
-		fileCount := ldb.scanFoldersParallelStreaming(folders, recursive, progress, titles, skipped, numWorkers)
+		fileCount, errors := ldb.scanFoldersParallelStreaming(folders, recursive, progress, titles, skipped, numWorkers)
+		scanErrors = errors
 
 		// Collect all files for database storage
 		for _, gameFiles := range titles {
@@ -167,7 +248,35 @@ func (ldb *LocalSwitchDBManager) CreateLocalSwitchFilesDB(folders []string,
 		progress.UpdateProgress(len(files), len(files), "Complete")
 	}
 
-	return &LocalSwitchFilesDB{TitlesMap: titles, Skipped: skipped, NumFiles: len(files)}, nil
+	return &LocalSwitchFilesDB{
+		TitlesMap:  titles,
+		Skipped:    skipped,
+		NumFiles:   len(files),
+		ScanErrors: scanErrors,
+	}, nil
+}
+
+// calculateBufferSize determines optimal channel buffer size
+func calculateBufferSize(numWorkers int, folderCount int) int {
+	// Base buffer: 2x workers
+	base := numWorkers * 2
+
+	// Increase for multiple folders (more concurrent producers)
+	if folderCount > 1 {
+		base = numWorkers * min(folderCount, 4)
+	}
+
+	// Cap at reasonable limit to prevent excessive memory use
+	const maxBuffer = 1000
+	return min(base, maxBuffer)
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // scanFoldersParallelStreaming scans multiple folders in parallel with streaming processing
@@ -177,14 +286,23 @@ func (ldb *LocalSwitchDBManager) scanFoldersParallelStreaming(
 	progress ProgressUpdater,
 	titles map[string]*SwitchGameFiles,
 	skipped map[ExtendedFileInfo]SkippedFile,
-	numWorkers int) int {
+	numWorkers int) (int, *ScanErrors) {
 
 	if len(folders) == 0 {
-		return 0
+		return 0, &ScanErrors{}
 	}
 
+	// Initialize error collector
+	scanErrors := &ScanErrors{
+		FolderErrors: make(map[string]error),
+		FileErrors:   make([]FileError, 0),
+	}
+
+	// Calculate optimal buffer sizes
+	bufferSize := calculateBufferSize(numWorkers, len(folders))
+
 	// Channels for streaming pipeline
-	filesChan := make(chan ExtendedFileInfo, numWorkers*2)
+	filesChan := make(chan ExtendedFileInfo, bufferSize)
 
 	// WaitGroup for folder scanning goroutines
 	var scanWg sync.WaitGroup
@@ -216,7 +334,12 @@ func (ldb *LocalSwitchDBManager) scanFoldersParallelStreaming(
 					fmt.Sprintf("scanning folder %d/%d: %s", folderIdx+1, len(folders), folderName))
 			}
 
-			ldb.scanFolderStreaming(folderPath, recursive, filesChan, progress, folderIdx, len(folders), &totalFilesFound, &counterMu)
+			// Scan folder and collect errors
+			err := ldb.scanFolderStreaming(folderPath, recursive, filesChan, progress, folderIdx, len(folders), &totalFilesFound, &counterMu, scanErrors)
+			if err != nil {
+				scanErrors.AddFolderError(folderPath, err)
+				zap.S().Errorf("Error scanning folder %s: %v", folderPath, err)
+			}
 		}(i, folder)
 	}
 
@@ -227,8 +350,8 @@ func (ldb *LocalSwitchDBManager) scanFoldersParallelStreaming(
 	}()
 
 	// Start worker pool for processing files
-	jobs := make(chan FileJob, numWorkers*2)
-	results := make(chan FileResult, numWorkers*2)
+	jobs := make(chan FileJob, bufferSize)
+	results := make(chan FileResult, bufferSize)
 
 	var workerWg sync.WaitGroup
 	for w := 0; w < numWorkers; w++ {
@@ -260,6 +383,10 @@ func (ldb *LocalSwitchDBManager) scanFoldersParallelStreaming(
 
 			// Handle error
 			if result.Error != nil {
+				// Record the error
+				filePath := filepath.Join(result.File.BaseFolder, result.File.FileName)
+				scanErrors.AddFileError(filePath, "metadata", result.Error)
+
 				mapMu.Lock()
 				if _, ok := skipped[result.File]; !ok {
 					skipped[result.File] = SkippedFile{
@@ -298,7 +425,7 @@ func (ldb *LocalSwitchDBManager) scanFoldersParallelStreaming(
 	// Wait for result collector
 	<-done
 
-	return int(processedFiles)
+	return int(processedFiles), scanErrors
 }
 
 // scanFolderStreaming scans a folder and streams files to a channel
@@ -310,7 +437,8 @@ func (ldb *LocalSwitchDBManager) scanFolderStreaming(
 	folderIdx int,
 	totalFolders int,
 	totalFilesFound *int64,
-	counterMu *sync.Mutex) error {
+	counterMu *sync.Mutex,
+	scanErrors *ScanErrors) error {
 
 	localFilesFound := 0
 
@@ -403,6 +531,10 @@ func (ldb *LocalSwitchDBManager) scanFolderStreaming(
 		Unsorted:      true,
 		ScratchBuffer: make([]byte, 64*1024),
 		ErrorCallback: func(osPathname string, err error) godirwalk.ErrorAction {
+			// Record file stat errors
+			if scanErrors != nil {
+				scanErrors.AddFileError(osPathname, "scan", err)
+			}
 			zap.S().Errorf("Error scanning %s: %v", osPathname, err)
 			return godirwalk.SkipNode
 		},
