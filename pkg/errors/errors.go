@@ -302,14 +302,14 @@ func FormatError(err error) string {
 	var result strings.Builder
 
 	// Main error message
-	result.WriteString("❌ Error: ")
+	result.WriteString("Error: ")
 	result.WriteString(GetUserFriendlyMessage(err))
 	result.WriteString("\n")
 
 	// Recovery actions
 	actions := GetRecoveryActions(err)
 	if len(actions) > 0 {
-		result.WriteString("\n💡 Suggested actions:\n")
+		result.WriteString("\nSuggested actions:\n")
 		for _, action := range actions {
 			result.WriteString(fmt.Sprintf("   • %s\n", action))
 		}

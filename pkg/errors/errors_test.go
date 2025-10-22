@@ -235,9 +235,9 @@ func TestFormatError(t *testing.T) {
 	err := New(ErrorTypeFileNotFound, "test file").WithContext("path", "/test/file")
 	formatted := FormatError(err)
 
-	assert.Contains(t, formatted, "❌ Error:")
+	assert.Contains(t, formatted, "Error:")
 	assert.Contains(t, formatted, "File not found: /test/file")
-	assert.Contains(t, formatted, "💡 Suggested actions:")
+	assert.Contains(t, formatted, "Suggested actions:")
 	assert.Contains(t, formatted, "Check if the file path is correct")
 }
 
@@ -250,7 +250,7 @@ func TestFormatError_RegularError(t *testing.T) {
 	err := errors.New("regular error")
 	formatted := FormatError(err)
 
-	assert.Contains(t, formatted, "❌ Error:")
+	assert.Contains(t, formatted, "Error:")
 	assert.Contains(t, formatted, "regular error")
-	assert.Contains(t, formatted, "💡 Suggested actions:")
+	assert.Contains(t, formatted, "Suggested actions:")
 }

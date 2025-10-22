@@ -2,7 +2,7 @@
 
 A powerful CLI tool for managing your Nintendo Switch game library backups. Scan, organize, and check for missing updates and DLC with advanced performance optimizations and multi-language support.
 
-## ✨ Features
+## Features
 
 ### Core Functionality
 - **Pure CLI Interface** - Fast, lightweight, and server-friendly
@@ -21,7 +21,7 @@ A powerful CLI tool for managing your Nintendo Switch game library backups. Scan
 - **Transaction Safety** - Rollback capability for organize operations
 - **Structured Output** - Table, JSON, CSV formats for automation
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Installation
 
@@ -53,7 +53,7 @@ slm scan -F "/games1,/games2" --format json
 slm scan -f /path/to/games --rename --create-folders --dry-run
 ```
 
-## 📖 Command Reference
+## Command Reference
 
 ### Main Commands
 
@@ -126,7 +126,7 @@ slm cache --path                           # Show cache directory
 --version                   # Show version
 ```
 
-## 🎯 Templates
+## Templates
 
 ### Predefined Templates
 
@@ -161,7 +161,7 @@ slm scan -f /games --template /path/to/custom-template.json
 - `{TYPE}` - Content type [UPD, DLC]
 - `{DLC_NAME}` - DLC name (for DLC only)
 
-## ⚙️ Configuration
+## Configuration
 
 SLM uses a configuration file located at `$HOME/.config/slm/config.json` (or `$HOME/.slm/config.json`).
 
@@ -197,7 +197,7 @@ SLM uses a configuration file located at `$HOME/.config/slm/config.json` (or `$H
 - **organize_options**: Default organization behavior
 - **ignore_dlc_title_ids**: DLC titles to skip during checks
 
-## 🔧 Performance & Environment
+## Performance & Environment
 
 ### Automatic Optimization
 
@@ -221,7 +221,7 @@ slm scan -f /games --memory-limit 2048
 slm scan -f /games --profile
 ```
 
-## 🔐 Nintendo Switch Keys (Optional)
+## Nintendo Switch Keys (Optional)
 
 For accurate file classification, provide a `prod.keys` file:
 
@@ -231,7 +231,7 @@ For accurate file classification, provide a `prod.keys` file:
 
 **Note**: Only `header_key` and `key_area_key_application_XX` keys are required.
 
-## 📁 Directory Structure
+## Directory Structure
 
 ```
 $HOME/.config/slm/
@@ -249,7 +249,7 @@ $HOME/.config/slm/
     └── prod.keys           # Nintendo Switch keys (optional)
 ```
 
-## 🤖 Automation & Scripting
+## Automation & Scripting
 
 ### JSON Output for Scripts
 
@@ -273,7 +273,7 @@ slm scan -f /games --format csv > library.csv
 # Import into spreadsheet applications
 ```
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Enable Debug Logging
 
@@ -298,7 +298,7 @@ Logs are saved to `$HOME/.config/slm/logs/slm.log`
 slm scan -f /games --profile
 ```
 
-## 🔄 Migration from GUI Version
+## Migration from GUI Version
 
 If upgrading from the old GUI version:
 
@@ -310,7 +310,7 @@ slm config --migrate /path/to/old/settings.json
 cp /old/app/folder/settings.json $HOME/.config/slm/config.json
 ```
 
-## 🏗️ Building from Source
+## Building from Source
 
 ### Prerequisites
 - Go 1.21 or later
@@ -348,7 +348,7 @@ go run -race . scan -f /test/folder
 go test -v -run "TestIntegration" .
 ```
 
-## 📋 Examples
+## Examples
 
 ### Daily Workflow
 
@@ -380,13 +380,13 @@ slm scan -f /games --locale KR.ko
 slm scan -f /games --check-all --format json | jq '.missing_content | length'
 ```
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - [blawar's titledb](https://github.com/blawar/titledb) for title metadata
-- [Bubble Tea](https://github.com/charmbracelet/bubbletea) for TUI framework
+- [go-pretty](https://github.com/jedib0t/go-pretty) for table and progress rendering
 - [Cobra](https://github.com/spf13/cobra) for CLI framework
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 

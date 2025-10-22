@@ -139,7 +139,7 @@ func ListTemplates() string {
 	result.WriteString("Available templates:\n\n")
 
 	for _, tmpl := range PredefinedTemplates() {
-		result.WriteString(fmt.Sprintf("📋 %s\n", tmpl.Name))
+		result.WriteString(fmt.Sprintf("  %s\n", tmpl.Name))
 		result.WriteString(fmt.Sprintf("   %s\n", tmpl.Description))
 		result.WriteString(fmt.Sprintf("   Example: %s\n\n", tmpl.Example))
 	}

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/giwty/switch-library-manager/db"
@@ -103,54 +102,22 @@ func showCacheStatus(cacheDir string) error {
 		return fmt.Errorf("failed to scan cache directory: %v", err)
 	}
 
-	fmt.Printf("Total Size: %s\n", formatSize(totalSize))
-	fmt.Printf("Total Files: %d\n", fileCount)
+	fmt.Printf("Cache: %d files, %s\n", fileCount, formatSize(totalSize))
 
 	// Show title database info
 	titleDBDir := filepath.Join(cacheDir, "titledb")
 	if info, err := os.Stat(titleDBDir); err == nil && info.IsDir() {
 		titleDBFiles, titleDBSize := countFiles(titleDBDir)
-		fmt.Printf("\nTitle Databases:\n")
-		fmt.Printf("  Files: %d\n", titleDBFiles)
-		fmt.Printf("  Size: %s\n", formatSize(titleDBSize))
+		fmt.Printf("Title DBs: %d files, %s\n", titleDBFiles, formatSize(titleDBSize))
 
-		// List individual title DB files
-		entries, err := os.ReadDir(titleDBDir)
-		if err == nil {
-			for _, entry := range entries {
-				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
-					info, err := entry.Info()
-					if err == nil {
-						fmt.Printf("    %s: %s\n", entry.Name(), formatSize(info.Size()))
-					}
-				}
-			}
-		}
 	}
 
 	// Show local database info
 	dbDir := filepath.Join(cacheDir, "db")
 	if info, err := os.Stat(dbDir); err == nil && info.IsDir() {
 		dbFiles, dbSize := countFiles(dbDir)
-		fmt.Printf("\nLocal Databases:\n")
-		fmt.Printf("  Files: %d\n", dbFiles)
-		fmt.Printf("  Size: %s\n", formatSize(dbSize))
+		fmt.Printf("Local DBs: %d files, %s\n", dbFiles, formatSize(dbSize))
 
-		// List individual DB files with details
-		entries, err := os.ReadDir(dbDir)
-		if err == nil {
-			for _, entry := range entries {
-				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".db") {
-					info, err := entry.Info()
-					if err == nil {
-						fmt.Printf("    %s: %s (modified: %s)\n",
-							entry.Name(),
-							formatSize(info.Size()),
-							info.ModTime().Format("2006-01-02 15:04:05"))
-					}
-				}
-			}
-		}
 	}
 
 	// Show versions file info
@@ -207,7 +174,7 @@ func updateCacheFiles(cacheDir string) error {
 	}
 
 	startTime := time.Now()
-	fmt.Println("🔄 Downloading latest databases...")
+	fmt.Println("Downloading latest databases...")
 
 	// Ensure titledb directory exists
 	titleDBDir := filepath.Join(cacheDir, "titledb")
@@ -218,18 +185,18 @@ func updateCacheFiles(cacheDir string) error {
 	updatedCount := 0
 
 	// Download versions.json
-	fmt.Print("  📋 Updating versions database... ")
+	fmt.Print("Updating versions database... ")
 	versionsPath := filepath.Join(cacheDir, settings.VERSIONS_JSON_FILENAME)
 	versionsFile, versionsEtag, err := db.LoadAndUpdateFile(settings.VERSIONS_JSON_URL, versionsPath, appSettings.VersionsEtag)
 	if err != nil {
-		fmt.Printf("❌ Failed: %v\n", err)
+		fmt.Printf("Failed: %v\n", err)
 	} else {
 		if versionsEtag != appSettings.VersionsEtag {
 			appSettings.VersionsEtag = versionsEtag
 			updatedCount++
-			fmt.Println("✅ Updated")
+			fmt.Println("Updated")
 		} else {
-			fmt.Println("✅ Already up to date")
+			fmt.Println("Already up to date")
 		}
 		versionsFile.Close()
 	}
@@ -240,7 +207,7 @@ func updateCacheFiles(cacheDir string) error {
 	}
 
 	for _, locale := range appSettings.LocalePriority {
-		fmt.Printf("  🌍 Updating %s title database... ", locale)
+		fmt.Printf("  Updating %s title database... ", locale)
 
 		url := appSettings.GetTitleDBURL(locale)
 		titlePath := filepath.Join(titleDBDir, locale+".json")
@@ -252,14 +219,14 @@ func updateCacheFiles(cacheDir string) error {
 
 		titleFile, newEtag, err := db.LoadAndUpdateFile(url, titlePath, etag)
 		if err != nil {
-			fmt.Printf("❌ Failed: %v\n", err)
+			fmt.Printf("Failed: %v\n", err)
 		} else {
 			if newEtag != etag {
 				appSettings.TitlesETags[locale] = newEtag
 				updatedCount++
-				fmt.Println("✅ Updated")
+				fmt.Println("Updated")
 			} else {
-				fmt.Println("✅ Already up to date")
+				fmt.Println("Already up to date")
 			}
 			titleFile.Close()
 		}
@@ -267,12 +234,12 @@ func updateCacheFiles(cacheDir string) error {
 
 	// Save updated settings
 	if err := configMgr.Save(); err != nil {
-		fmt.Printf("⚠️  Warning: Failed to save settings: %v\n", err)
+		fmt.Printf("Warning: Failed to save settings: %v\n", err)
 	}
 
 	duration := time.Since(startTime)
-	fmt.Printf("\n🎉 Cache update completed in %v\n", duration.Round(time.Millisecond))
-	fmt.Printf("📊 Updated %d databases\n", updatedCount)
+	fmt.Printf("\nCache update completed in %v\n", duration.Round(time.Millisecond))
+	fmt.Printf("Updated %d databases\n", updatedCount)
 
 	// Show updated cache status
 	fmt.Println("\nUpdated cache status:")
