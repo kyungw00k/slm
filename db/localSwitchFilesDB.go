@@ -22,6 +22,11 @@ import (
 var (
 	versionRegex = regexp.MustCompile(`\[[vV]?(?P<version>[0-9]{1,10})]`)
 	titleIdRegex = regexp.MustCompile(`\[(?P<titleId>[A-Z,a-z0-9]{16})]`)
+
+	// Regex for extracting game name from filename
+	// Matches patterns like [TitleID][Version] or __Kor_, __Jpn_, etc.
+	bracketPatternRegex = regexp.MustCompile(`\[[\dA-Fa-f]{16}\](?:\[v\d+\])?`)
+	localePatternRegex  = regexp.MustCompile(`__[A-Za-z]+_`)
 )
 
 const (
@@ -1133,12 +1138,37 @@ func parseTitleIdFromFileName(fileName string) (*string, error) {
 	return &titleId, nil
 }
 
+// ParseTitleNameFromFileName extracts a human-readable game name from a filename.
+// It handles various filename patterns:
+//   - Game_Name__Kor_.nsp → "Game Name"
+//   - Game_Name_[TitleID][Version].nsp → "Game Name"
+//   - [TitleID][Version].nsp → "" (no extractable name)
+//
+// The function removes title IDs, version numbers, locale suffixes, and converts
+// underscores to spaces for better readability.
 func ParseTitleNameFromFileName(fileName string) string {
-	ind := strings.Index(fileName, "[")
-	if ind != -1 {
-		return fileName[:ind]
-	}
-	return fileName
+	// Remove file extension
+	name := strings.TrimSuffix(fileName, filepath.Ext(fileName))
+
+	// Remove [TitleID][Version] patterns (e.g., [01006DD01EB6C000][v0])
+	name = bracketPatternRegex.ReplaceAllString(name, "")
+
+	// Remove locale patterns (e.g., __Kor_, __Jpn_, __Eng_)
+	name = localePatternRegex.ReplaceAllString(name, "")
+
+	// Remove any remaining brackets and their contents
+	name = regexp.MustCompile(`\[[^\]]*\]`).ReplaceAllString(name, "")
+
+	// Replace underscores with spaces
+	name = strings.ReplaceAll(name, "_", " ")
+
+	// Clean up multiple spaces
+	name = regexp.MustCompile(`\s+`).ReplaceAllString(name, " ")
+
+	// Trim leading and trailing whitespace
+	name = strings.TrimSpace(name)
+
+	return name
 }
 
 // ListGames retrieves games from the database with filtering, sorting, and pagination

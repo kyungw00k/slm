@@ -3,6 +3,7 @@ package cmd
 import (
 	"crypto/md5"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -219,25 +220,28 @@ func findDB(configMgr *config.Manager, scanPath string) (string, error) {
 	return mostRecentDB, nil
 }
 
-// loadTitlesDB loads the titles database if available
+// loadTitlesDB loads the titles database with multi-language support
 func loadTitlesDB(configMgr *config.Manager) (*db.SwitchTitlesDB, error) {
 	titleDBDir := configMgr.GetTitleDBDir()
 	localePriority := []string{"KR.ko", "JP.ja", "US.en"}
 
-	// Find primary title file
-	var primaryTitleFile *os.File
+	// Load all available title files in priority order
+	var titleFiles []*os.File
 	for _, locale := range localePriority {
 		titlePath := filepath.Join(titleDBDir, fmt.Sprintf("%s.json", locale))
 		if file, err := os.Open(titlePath); err == nil {
-			primaryTitleFile = file
-			break
+			titleFiles = append(titleFiles, file)
 		}
 	}
 
-	if primaryTitleFile == nil {
+	if len(titleFiles) == 0 {
 		return nil, fmt.Errorf("no title database files found")
 	}
-	defer primaryTitleFile.Close()
+	defer func() {
+		for _, file := range titleFiles {
+			file.Close()
+		}
+	}()
 
 	// Load versions file
 	versionsPath := filepath.Join(configMgr.GetCacheDir(), settings.VERSIONS_JSON_FILENAME)
@@ -247,8 +251,14 @@ func loadTitlesDB(configMgr *config.Manager) (*db.SwitchTitlesDB, error) {
 	}
 	defer versionsFile.Close()
 
-	// Create title database
-	titlesDB, err := db.CreateSwitchTitleDB(primaryTitleFile, versionsFile)
+	// Convert to []io.Reader for the function call
+	var titleReaders []io.Reader
+	for _, file := range titleFiles {
+		titleReaders = append(titleReaders, file)
+	}
+
+	// Create title database with multi-language support
+	titlesDB, err := db.CreateSwitchTitleDBMultiLang(titleReaders, versionsFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create title database: %v", err)
 	}

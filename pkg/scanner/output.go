@@ -147,15 +147,13 @@ func (s *Scanner) buildScanResult(localDB *db.LocalSwitchFilesDB, titlesDB *db.S
 			}
 		}
 
-		// 3. If nothing worked, try filename parsing with Korean mapping
+		// 3. If nothing worked, try filename parsing
 		if gameName == titleID {
 			fileName := gameFiles.File.ExtendedInfo.FileName
-			if idx := strings.Index(fileName, "["); idx != -1 {
-				extracted := strings.TrimSpace(fileName[:idx])
-				if extracted != "" {
-					// Try to map to Korean titles for common games
-					gameName = mapToKoreanTitle(extracted)
-				}
+			extracted := db.ParseTitleNameFromFileName(fileName)
+			if extracted != "" {
+				// Try to map to Korean titles for common games
+				gameName = mapToKoreanTitle(extracted)
 			}
 		}
 

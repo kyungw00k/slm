@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -280,27 +281,26 @@ func (s *Scanner) downloadDatabases(updater progress.ProgressUpdater) (*db.Switc
 		return nil, fmt.Errorf("no title files could be downloaded")
 	}
 
-	// Use primary title file according to locale priority
-	var primaryTitleFile *os.File
-	var primaryLocale string
+	// Build title files array in priority order (KR.ko -> JP.ja -> US.en)
+	var titleFilesArray []io.Reader
+	var localesUsed []string
 	for _, locale := range s.settings.LocalePriority {
 		if titleFile, exists := titleFiles[locale]; exists {
-			primaryTitleFile = titleFile
-			primaryLocale = locale
-			break
+			titleFilesArray = append(titleFilesArray, titleFile)
+			localesUsed = append(localesUsed, locale)
 		}
 	}
 
-	if primaryTitleFile == nil {
-		return nil, fmt.Errorf("no primary title file available")
+	if len(titleFilesArray) == 0 {
+		return nil, fmt.Errorf("no title files available")
 	}
 
 	updater.UpdateProgress(0, totalDownloads, totalDownloads,
-		fmt.Sprintf("Creating title database using %s locale...", primaryLocale),
-		"Building internal title database")
+		fmt.Sprintf("Creating multi-language title database (%s)...", strings.Join(localesUsed, ", ")),
+		"Building internal title database with locale priority")
 
-	// Create title database
-	titlesDB, err := db.CreateSwitchTitleDB(primaryTitleFile, versionsFile)
+	// Create title database with multi-language support
+	titlesDB, err := db.CreateSwitchTitleDBMultiLang(titleFilesArray, versionsFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create title database: %v", err)
 	}
@@ -663,24 +663,27 @@ func (s *Scanner) synchronizeDatabasePaths(originalDB, newDB *db.LocalSwitchFile
 	return nil
 }
 
-// loadTitlesDB loads the titles database from cache
+// loadTitlesDB loads the titles database from cache with multi-language support
 func (s *Scanner) loadTitlesDB() (*db.SwitchTitlesDB, error) {
 	titleDBDir := s.config.GetTitleDBDir()
 
-	// Find primary title file
-	var primaryTitleFile *os.File
+	// Load all available title files in priority order
+	var titleFiles []*os.File
 	for _, locale := range s.settings.LocalePriority {
-		titlePath := filepath.Join(titleDBDir, fmt.Sprintf("titles.%s.json", locale))
+		titlePath := filepath.Join(titleDBDir, fmt.Sprintf("%s.json", locale))
 		if file, err := os.Open(titlePath); err == nil {
-			primaryTitleFile = file
-			break
+			titleFiles = append(titleFiles, file)
 		}
 	}
 
-	if primaryTitleFile == nil {
+	if len(titleFiles) == 0 {
 		return nil, fmt.Errorf("no title database files found")
 	}
-	defer primaryTitleFile.Close()
+	defer func() {
+		for _, file := range titleFiles {
+			file.Close()
+		}
+	}()
 
 	// Load versions file
 	versionsPath := filepath.Join(s.config.GetCacheDir(), settings.VERSIONS_JSON_FILENAME)
@@ -690,8 +693,14 @@ func (s *Scanner) loadTitlesDB() (*db.SwitchTitlesDB, error) {
 	}
 	defer versionsFile.Close()
 
-	// Create title database
-	titlesDB, err := db.CreateSwitchTitleDB(primaryTitleFile, versionsFile)
+	// Convert to []io.Reader for the function call
+	var titleReaders []io.Reader
+	for _, file := range titleFiles {
+		titleReaders = append(titleReaders, file)
+	}
+
+	// Create title database with multi-language support
+	titlesDB, err := db.CreateSwitchTitleDBMultiLang(titleReaders, versionsFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create title database: %v", err)
 	}
