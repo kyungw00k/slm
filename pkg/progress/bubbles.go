@@ -167,7 +167,7 @@ type SimpleProgressUpdater struct {
 func (s *SimpleProgressUpdater) UpdateProgress(stage int, current, total int, message string, details ...string) error {
 	if stage != s.currentStage {
 		if s.currentStage < len(s.stages) && s.currentStage >= 0 {
-			fmt.Printf("[%d/%d] %s (completed)\n", s.currentStage+1, len(s.stages), s.stages[s.currentStage].Name)
+			fmt.Printf("\r[%d/%d] %s (completed)\n", s.currentStage+1, len(s.stages), s.stages[s.currentStage].Name)
 		}
 		s.currentStage = stage
 		if stage < len(s.stages) {
@@ -175,10 +175,16 @@ func (s *SimpleProgressUpdater) UpdateProgress(stage int, current, total int, me
 		}
 	}
 
-	// Only show progress for stages with totals, skip verbose messages
-	if total > 0 && current%100 == 0 { // Update every 100 items
+	// Show progress updates
+	if total > 0 && current > 0 && current%100 == 0 {
+		// Show percentage for stages with known totals
 		percentage := float64(current) / float64(total) * 100
 		fmt.Printf("\r[%d/%d] %s %d/%d (%.0f%%)", stage+1, len(s.stages), s.stages[stage].Name, current, total, percentage)
+	} else if message != "" && current >= 0 && total <= 0 {
+		// Show count for discovery stages (unknown total)
+		if current > 0 {
+			fmt.Printf("\r[%d/%d] %s %d files", stage+1, len(s.stages), s.stages[stage].Name, current)
+		}
 	}
 	return nil
 }
