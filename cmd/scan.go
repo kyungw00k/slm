@@ -18,6 +18,7 @@ var (
 	noRecursive    bool
 	format         string
 	locale         string
+	showTable      bool
 
 	// Check flags
 	checkAll       bool
@@ -78,8 +79,9 @@ func init() {
 	// Scan options
 	scanCmd.Flags().BoolVarP(&recursive, "recursive", "r", true, "scan recursively (default: true)")
 	scanCmd.Flags().BoolVar(&noRecursive, "no-recursive", false, "disable recursive scanning")
-	scanCmd.Flags().StringVar(&format, "format", "table", "output format (table, json, csv)")
+	scanCmd.Flags().StringVar(&format, "format", "table", "output format (table, json, csv) - only used with --show-table")
 	scanCmd.Flags().StringVar(&locale, "locale", "", "locale for title names (e.g., KR.ko, US.en, JP.ja)")
+	scanCmd.Flags().BoolVar(&showTable, "show-table", false, "show full game table after scan (default: summary only)")
 
 	// Check flags (mutually exclusive group)
 	scanCmd.Flags().BoolVar(&checkAll, "check-all", true, "check for all missing content (default)")
@@ -142,6 +144,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 		Recursive:         recursive,
 		Format:            format,
 		Locale:            locale,
+		ShowTable:         showTable,
 		CheckAll:          checkAll,
 		CheckUpdates:      checkUpdates,
 		CheckDLC:          checkDLC,
@@ -168,6 +171,7 @@ type ScanOptions struct {
 	Recursive         bool
 	Format            string
 	Locale            string
+	ShowTable         bool
 	CheckAll          bool
 	CheckUpdates      bool
 	CheckDLC          bool
@@ -202,6 +206,7 @@ func executeScan(opts *ScanOptions) error {
 		Recursive:         opts.Recursive,
 		Format:            opts.Format,
 		Locale:            opts.Locale,
+		ShowTable:         opts.ShowTable,
 		CheckAll:          opts.CheckAll,
 		CheckUpdates:      opts.CheckUpdates,
 		CheckDLC:          opts.CheckDLC,

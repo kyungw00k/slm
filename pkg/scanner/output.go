@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/giwty/switch-library-manager/db"
+	"github.com/giwty/switch-library-manager/settings"
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
 )
@@ -94,6 +95,12 @@ type ScanSummary struct {
 func (s *Scanner) OutputResults(localDB *db.LocalSwitchFilesDB, titlesDB *db.SwitchTitlesDB, missingUpdates map[string]interface{}, missingDLC map[string]interface{}) error {
 	result := s.buildScanResult(localDB, titlesDB, missingUpdates, missingDLC)
 
+	// If ShowTable is false, output summary only
+	if !s.options.ShowTable {
+		return s.outputSummary(result, localDB)
+	}
+
+	// Otherwise output full table/json/csv
 	switch OutputFormat(s.options.Format) {
 	case FormatTable:
 		return s.outputTable(result)
@@ -448,4 +455,90 @@ func (s *Scanner) outputCSV(result *ScanResult) error {
 	}
 
 	return nil
+}
+
+// outputSummary outputs a concise summary of the scan results
+func (s *Scanner) outputSummary(result *ScanResult, localDB *db.LocalSwitchFilesDB) error {
+	fmt.Println()
+	fmt.Println(strings.Repeat("=", 80))
+	fmt.Println("SCAN SUMMARY")
+	fmt.Println(strings.Repeat("=", 80))
+	fmt.Println()
+
+	// Count different types of games
+	baseGames := 0
+	updatesCount := 0
+	dlcCount := 0
+
+	for _, game := range result.Games {
+		if game.HasBase {
+			baseGames++
+		}
+		updatesCount += game.UpdateCount
+		dlcCount += game.DLCCount
+	}
+
+	// Display basic statistics
+	fmt.Printf("Total games:     %d\n", result.Summary.TotalGames)
+	fmt.Printf("  - Base games:  %d\n", baseGames)
+	fmt.Printf("  - Updates:     %d\n", updatesCount)
+	fmt.Printf("  - DLC:         %d\n", dlcCount)
+	fmt.Println()
+
+	// Display missing content if any
+	if result.Summary.MissingUpdates > 0 || result.Summary.MissingDLC > 0 {
+		fmt.Println("Missing content:")
+		if result.Summary.MissingUpdates > 0 {
+			fmt.Printf("  - Updates:     %d games\n", result.Summary.MissingUpdates)
+		}
+		if result.Summary.MissingDLC > 0 {
+			fmt.Printf("  - DLC:         %d games\n", result.Summary.MissingDLC)
+		}
+		fmt.Println()
+	} else if result.Summary.TotalGames > 0 {
+		fmt.Println("All games are up to date!")
+		fmt.Println()
+	}
+
+	// Display scan statistics
+	fmt.Printf("Scanned files:   %d\n", localDB.NumFiles)
+	if len(localDB.Skipped) > 0 {
+		fmt.Printf("Skipped files:   %d\n", len(localDB.Skipped))
+	}
+
+	// Display errors if any
+	if localDB.ScanErrors != nil && localDB.ScanErrors.HasErrors() {
+		fmt.Println()
+		fmt.Printf("Errors encountered: %d folder errors, %d file errors\n",
+			len(localDB.ScanErrors.FolderErrors),
+			len(localDB.ScanErrors.FileErrors))
+	}
+
+	// Display database path
+	dbPath := filepath.Join(s.config.GetLocalDBDir(), "scan_*.db")
+	fmt.Println()
+	fmt.Printf("Database path:   %s\n", dbPath)
+	fmt.Println()
+
+	// Hint about list command
+	if result.Summary.TotalGames > 0 {
+		fmt.Println(strings.Repeat("-", 80))
+		fmt.Println("To view detailed game list, use:")
+		fmt.Println("  slm list                    # Show first 50 games")
+		fmt.Println("  slm list --missing-updates  # Show games missing updates")
+		fmt.Println("  slm list --title zelda      # Search for specific games")
+		fmt.Println("  slm scan --show-table       # Re-scan and show full table")
+		fmt.Println(strings.Repeat("-", 80))
+	}
+
+	return nil
+}
+
+// Helper functions to expose scanner internals for list command
+func (s *Scanner) SetOptions(opts *Options) {
+	s.options = opts
+}
+
+func (s *Scanner) SetSettings(appSettings *settings.AppSettings) {
+	s.settings = appSettings
 }

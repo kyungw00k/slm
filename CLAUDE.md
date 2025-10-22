@@ -92,7 +92,8 @@ git commit -m "docs: update performance optimization results in Context.md"
 
 ### Command Structure (cmd/)
 - **Root Command**: `cmd/root.go` - Main CLI entry point with global flags
-- **Scan Command**: `cmd/scan.go` - Primary functionality combining scanning, checking, and organizing
+- **Scan Command**: `cmd/scan.go` - Scan game files and build database (outputs summary by default)
+- **List Command**: `cmd/list.go` - Query and filter games from database with pagination
 - **Config Command**: `cmd/config.go` - Configuration management
 - **Cache Command**: `cmd/cache.go` - Cache and database management
 
@@ -100,7 +101,7 @@ git commit -m "docs: update performance optimization results in Context.md"
 
 **pkg/scanner**: Main orchestration logic
 - `scanner.go`: Multi-stage scan process with TUI progress tracking
-- `output.go`: Multi-format output (table/JSON/CSV) with structured data models
+- `output.go`: Multi-format output (table/JSON/CSV) with summary and detailed views
 
 **pkg/config**: Configuration management
 - Handles `$HOME/.config/slm/config.json` and migration from legacy `settings.json`
@@ -117,7 +118,7 @@ git commit -m "docs: update performance optimization results in Context.md"
 - `incompleteTitleProcessor.go`: Missing content detection
 
 **db/**: Database layer (BoltDB)
-- `localSwitchFilesDB.go`: Local game library database
+- `localSwitchFilesDB.go`: Local game library database with filtering and pagination (ListGames)
 - `switchTitlesDB.go`: Title metadata from remote sources
 - `persistentDB.go`: Database persistence layer
 
@@ -152,6 +153,12 @@ git commit -m "docs: update performance optimization results in Context.md"
 - JSON for machine consumption and scripting
 - CSV for data analysis and spreadsheet import
 
+**Scan/List Separation Pattern**: Clean separation of concerns for better UX:
+- `scan`: Builds database and outputs concise summary (total games, missing content, database location)
+- `list`: Queries existing database with filtering, sorting, and pagination
+- Use `--show-table` flag on `scan` to show full table immediately after scanning
+- This pattern prevents overwhelming output for large game libraries (3000+ titles)
+
 ## Important Implementation Details
 
 **Database Path Synchronization**: After file organization, the system re-scans to update database entries with new file paths. This ensures database consistency.
@@ -185,6 +192,85 @@ $HOME/.config/slm/
 **Transaction Testing**: Organize operations should be testable with dry-run mode to verify planned changes before execution.
 
 **Output Format Testing**: All three output formats (table/JSON/CSV) should produce consistent data structures.
+
+## Common Usage Examples
+
+**Basic Workflow:**
+```bash
+# 1. Scan your game library (creates database and shows summary)
+slm scan -f /path/to/games
+
+# 2. List games with various filters
+slm list                          # First 50 games
+slm list --missing-updates        # Games needing updates
+slm list --title "zelda"          # Search by title
+slm list --page 2 --per-page 100  # Pagination
+slm list --format json            # JSON output
+
+# 3. Scan with full table output (for smaller libraries)
+slm scan -f /games --show-table
+
+# 4. Organize games after scanning
+slm scan -f /games --rename --create-folders --dry-run  # Preview changes
+slm scan -f /games --rename --create-folders            # Apply changes
+```
+
+**List Command Examples:**
+```bash
+# Filter by missing content
+slm list --missing-updates           # Games with available updates
+slm list --missing-dlc              # Games with available DLC
+
+# Search and filter
+slm list --title "pokemon"          # Case-insensitive title search
+slm list --title-id 0100f2c         # Search by title ID prefix
+
+# Sorting
+slm list --sort title               # Sort by title (default)
+slm list --sort title-id            # Sort by title ID
+slm list --sort missing             # Sort by missing content count (descending)
+
+# Pagination
+slm list --page 3                   # Show page 3
+slm list --per-page 25              # 25 results per page
+slm list --limit 10                 # Show only first 10 results
+
+# Output formats
+slm list --format table             # Human-readable table (default)
+slm list --format json              # JSON for scripting
+slm list --format csv               # CSV for spreadsheets
+
+# Combined filters
+slm list --missing-updates --sort missing --limit 20  # Top 20 games needing updates
+```
+
+**Scan Command Options:**
+```bash
+# Basic scanning
+slm scan -f /games                  # Scan single folder
+slm scan -F "/games1,/games2"       # Scan multiple folders
+slm scan -f /games --no-recursive   # Non-recursive scan
+
+# Content checking
+slm scan -f /games --no-check       # Skip missing content check
+slm scan -f /games --check-updates  # Check updates only
+slm scan -f /games --check-dlc      # Check DLC only
+
+# File organization
+slm scan -f /games --rename                           # Rename files
+slm scan -f /games --create-folders                   # Create per-game folders
+slm scan -f /games --rename --create-folders --dry-run # Preview changes
+slm scan -f /games --delete-old-updates               # Remove old updates
+
+# Output control
+slm scan -f /games                  # Summary only (default)
+slm scan -f /games --show-table     # Show full table after scan
+slm scan -f /games --show-table --format json  # Full output in JSON
+
+# Performance tuning
+slm scan -f /games --max-workers 8  # Use 8 parallel workers
+slm scan -f /games --profile        # Enable performance profiling
+```
 
 ## Legacy Code Notes
 

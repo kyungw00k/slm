@@ -34,6 +34,7 @@ type Options struct {
 	Recursive         bool
 	Format            string
 	Locale            string
+	ShowTable         bool
 	CheckAll          bool
 	CheckUpdates      bool
 	CheckDLC          bool

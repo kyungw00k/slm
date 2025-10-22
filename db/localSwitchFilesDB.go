@@ -55,6 +55,14 @@ func NewLocalSwitchDBManagerWithScanPaths(baseFolder string, scanPaths []string)
 	return &LocalSwitchDBManager{db: db}, nil
 }
 
+func NewLocalSwitchDBManagerWithPath(dbPath string) (*LocalSwitchDBManager, error) {
+	db, err := NewPersistentDBWithPath(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	return &LocalSwitchDBManager{db: db}, nil
+}
+
 func (ldb *LocalSwitchDBManager) Close() {
 	ldb.db.Close()
 }
@@ -170,6 +178,18 @@ type LocalSwitchFilesDB struct {
 	Skipped     map[ExtendedFileInfo]SkippedFile
 	NumFiles    int
 	ScanErrors  *ScanErrors // Errors encountered during scanning
+}
+
+// ListOptions represents options for listing games
+type ListOptions struct {
+	MissingUpdates bool
+	MissingDLC     bool
+	TitleFilter    string
+	TitleIDFilter  string
+	Limit          int
+	SortBy         string // "title", "title-id", "missing"
+	Page           int
+	PerPage        int
 }
 
 // FileJob represents a file to be processed by a worker
@@ -1119,4 +1139,252 @@ func ParseTitleNameFromFileName(fileName string) string {
 		return fileName[:ind]
 	}
 	return fileName
+}
+
+// ListGames retrieves games from the database with filtering, sorting, and pagination
+func (ldb *LocalSwitchDBManager) ListGames(opts ListOptions, titlesDB *SwitchTitlesDB) ([]*SwitchGameFiles, int, error) {
+	// Load titles from database
+	titles := map[string]*SwitchGameFiles{}
+	err := ldb.db.GetEntry(DB_TABLE_LOCAL_LIBRARY, "titles", &titles)
+	if err != nil || len(titles) == 0 {
+		return nil, 0, fmt.Errorf("no games found in database")
+	}
+
+	// Collect all games that match filters
+	var filteredGames []*SwitchGameFiles
+
+	for titleID, gameFiles := range titles {
+		// Skip games without base
+		if !gameFiles.BaseExist {
+			continue
+		}
+
+		// Apply title ID filter
+		if opts.TitleIDFilter != "" {
+			fullTitleID := titleID + "000" // Base game suffix
+			if gameFiles.File.Metadata != nil {
+				fullTitleID = gameFiles.File.Metadata.TitleId
+			}
+			if !strings.Contains(strings.ToLower(fullTitleID), strings.ToLower(opts.TitleIDFilter)) {
+				continue
+			}
+		}
+
+		// Apply title name filter (case-insensitive)
+		if opts.TitleFilter != "" {
+			titleName := titleID // fallback to ID
+
+			// Try to get name from metadata
+			if gameFiles.File.Metadata != nil && gameFiles.File.Metadata.Ncap != nil {
+				localePriority := []string{"KR.ko", "JP.ja", "US.en"}
+				if name := gameFiles.File.Metadata.Ncap.GetBestTitleName(localePriority); name != "" {
+					titleName = name
+				}
+			}
+
+			// Try to get from title database
+			if titleName == titleID && titlesDB != nil && titlesDB.TitlesMap != nil {
+				if title, exists := titlesDB.TitlesMap[titleID]; exists && title.Attributes.Name != "" {
+					titleName = title.Attributes.Name
+				}
+			}
+
+			// Try filename parsing as last resort
+			if titleName == titleID {
+				titleName = ParseTitleNameFromFileName(gameFiles.File.ExtendedInfo.FileName)
+			}
+
+			// Case-insensitive match
+			if !strings.Contains(strings.ToLower(titleName), strings.ToLower(opts.TitleFilter)) {
+				continue
+			}
+		}
+
+		// Apply missing updates filter
+		if opts.MissingUpdates && titlesDB != nil && titlesDB.TitlesMap != nil {
+			if title, exists := titlesDB.TitlesMap[titleID]; exists {
+				hasMissingUpdate := false
+				if len(title.Updates) > 0 {
+					// Check if any update in TitlesDB is newer than local
+					localVersion := 0
+					if gameFiles.LatestUpdate > 0 {
+						localVersion = gameFiles.LatestUpdate
+					} else if gameFiles.File.Metadata != nil {
+						localVersion = int(gameFiles.File.Metadata.Version)
+					}
+
+					for version := range title.Updates {
+						if version > localVersion {
+							hasMissingUpdate = true
+							break
+						}
+					}
+				}
+				if !hasMissingUpdate {
+					continue
+				}
+			} else {
+				continue
+			}
+		}
+
+		// Apply missing DLC filter
+		if opts.MissingDLC && titlesDB != nil && titlesDB.TitlesMap != nil {
+			if title, exists := titlesDB.TitlesMap[titleID]; exists {
+				hasMissingDLC := false
+				if len(title.Dlc) > 0 {
+					// Check if any DLC in TitlesDB is not in local library
+					for dlcID := range title.Dlc {
+						if _, hasLocal := gameFiles.Dlc[dlcID]; !hasLocal {
+							hasMissingDLC = true
+							break
+						}
+					}
+				}
+				if !hasMissingDLC {
+					continue
+				}
+			} else {
+				continue
+			}
+		}
+
+		filteredGames = append(filteredGames, gameFiles)
+	}
+
+	totalCount := len(filteredGames)
+
+	// Sort games
+	sortGames(filteredGames, opts.SortBy, titlesDB)
+
+	// Apply limit if specified
+	if opts.Limit > 0 && len(filteredGames) > opts.Limit {
+		filteredGames = filteredGames[:opts.Limit]
+		totalCount = opts.Limit // Update total to reflect limit
+	}
+
+	// Apply pagination (only if no limit specified)
+	if opts.Limit == 0 {
+		startIdx := (opts.Page - 1) * opts.PerPage
+		endIdx := startIdx + opts.PerPage
+
+		if startIdx >= len(filteredGames) {
+			return []*SwitchGameFiles{}, totalCount, nil
+		}
+
+		if endIdx > len(filteredGames) {
+			endIdx = len(filteredGames)
+		}
+
+		filteredGames = filteredGames[startIdx:endIdx]
+	}
+
+	return filteredGames, totalCount, nil
+}
+
+// sortGames sorts games based on the specified sort option
+func sortGames(games []*SwitchGameFiles, sortBy string, titlesDB *SwitchTitlesDB) {
+	// Helper to get game name
+	getGameName := func(game *SwitchGameFiles) string {
+		titleID := game.File.Metadata.TitleId
+		if len(titleID) >= 4 {
+			titleID = titleID[:len(titleID)-4]
+		}
+
+		// Try metadata
+		if game.File.Metadata != nil && game.File.Metadata.Ncap != nil {
+			localePriority := []string{"KR.ko", "JP.ja", "US.en"}
+			if name := game.File.Metadata.Ncap.GetBestTitleName(localePriority); name != "" {
+				return strings.ToLower(name)
+			}
+		}
+
+		// Try title DB
+		if titlesDB != nil && titlesDB.TitlesMap != nil {
+			if title, exists := titlesDB.TitlesMap[titleID]; exists && title.Attributes.Name != "" {
+				return strings.ToLower(title.Attributes.Name)
+			}
+		}
+
+		// Fallback to filename
+		return strings.ToLower(ParseTitleNameFromFileName(game.File.ExtendedInfo.FileName))
+	}
+
+	// Helper to count missing content
+	getMissingCount := func(game *SwitchGameFiles) int {
+		if titlesDB == nil || titlesDB.TitlesMap == nil {
+			return 0
+		}
+
+		titleID := game.File.Metadata.TitleId
+		if len(titleID) >= 4 {
+			titleID = titleID[:len(titleID)-4]
+		}
+
+		title, exists := titlesDB.TitlesMap[titleID]
+		if !exists {
+			return 0
+		}
+
+		missing := 0
+
+		// Count missing updates
+		localVersion := game.LatestUpdate
+		if localVersion == 0 && game.File.Metadata != nil {
+			localVersion = int(game.File.Metadata.Version)
+		}
+		for version := range title.Updates {
+			if version > localVersion {
+				missing++
+			}
+		}
+
+		// Count missing DLC
+		for dlcID := range title.Dlc {
+			if _, hasLocal := game.Dlc[dlcID]; !hasLocal {
+				missing++
+			}
+		}
+
+		return missing
+	}
+
+	// Sort based on option
+	switch sortBy {
+	case "title-id":
+		// Sort by title ID
+		for i := 0; i < len(games)-1; i++ {
+			for j := i + 1; j < len(games); j++ {
+				id1 := games[i].File.Metadata.TitleId
+				id2 := games[j].File.Metadata.TitleId
+				if id1 > id2 {
+					games[i], games[j] = games[j], games[i]
+				}
+			}
+		}
+
+	case "missing":
+		// Sort by missing content count (descending)
+		for i := 0; i < len(games)-1; i++ {
+			for j := i + 1; j < len(games); j++ {
+				count1 := getMissingCount(games[i])
+				count2 := getMissingCount(games[j])
+				if count1 < count2 {
+					games[i], games[j] = games[j], games[i]
+				}
+			}
+		}
+
+	default: // "title"
+		// Sort by title name
+		for i := 0; i < len(games)-1; i++ {
+			for j := i + 1; j < len(games); j++ {
+				name1 := getGameName(games[i])
+				name2 := getGameName(games[j])
+				if name1 > name2 {
+					games[i], games[j] = games[j], games[i]
+				}
+			}
+		}
+	}
 }
