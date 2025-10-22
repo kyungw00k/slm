@@ -1,5 +1,23 @@
 .idea
-resources/app/vendor
 output
 .DS_Store
 *.keys
+
+# Build artifacts
+slm
+slm-new
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+*.out
+
+# Coverage
+*.coverprofile
+coverage.txt
+
+# golangci-lint cache
+.golangci-lint-cache
