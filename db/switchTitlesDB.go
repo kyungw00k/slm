@@ -48,8 +48,13 @@ func CreateSwitchTitleDB(titlesFile, versionsFile io.Reader) (*SwitchTitlesDB, e
 	}
 
 	result := SwitchTitlesDB{TitlesMap: map[string]*SwitchTitle{}}
-	for id, attr := range titles {
-		id = strings.ToLower(id)
+	for _, attr := range titles {
+		// Use the actual Nintendo title ID from the 'id' field, not the map key
+		// Skip entries without a valid Nintendo title ID
+		if attr.Id == "" {
+			continue
+		}
+		id := strings.ToLower(attr.Id)
 
 		//TitleAttributes id rules:
 		//main TitleAttributes ends with 000
@@ -117,8 +122,13 @@ func CreateSwitchTitleDBMultiLang(titleFiles []io.Reader, versionsFile io.Reader
 
 	// Build result using merged titles
 	result := SwitchTitlesDB{TitlesMap: map[string]*SwitchTitle{}}
-	for id, attr := range mergedTitles {
-		id = strings.ToLower(id)
+	for _, attr := range mergedTitles {
+		// Use the actual Nintendo title ID from the 'id' field, not the map key
+		// Skip entries without a valid Nintendo title ID
+		if attr.Id == "" {
+			continue
+		}
+		id := strings.ToLower(attr.Id)
 
 		//TitleAttributes id rules:
 		//main TitleAttributes ends with 000
