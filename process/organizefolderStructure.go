@@ -292,8 +292,13 @@ func getDlcName(switchTitle *db.SwitchTitle, file db.SwitchFileInfo) string {
 }
 
 func getTitleName(switchTitle *db.SwitchTitle, v *db.SwitchGameFiles) string {
-	// Read user's locale preferences
-	appSettings := settings.ReadSettings(".")
+	// Read user's locale preferences from proper config location
+	configDir := os.Getenv("SLM_CONFIG_DIR")
+	if configDir == "" {
+		homeDir, _ := os.UserHomeDir()
+		configDir = filepath.Join(homeDir, ".config", "slm")
+	}
+	appSettings := settings.ReadSettings(configDir)
 
 	// Try to get title name from NACP using locale priority
 	if v.File.Metadata.Ncap != nil {

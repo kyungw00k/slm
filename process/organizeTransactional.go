@@ -138,14 +138,21 @@ func planOrganizeOperations(baseFolder string,
 			updateProgress.UpdateProgress(i, tasksSize, fmt.Sprintf("Planning operations for: %s", gameFiles.File.ExtendedInfo.FileName))
 		}
 
-		titleName := getTitleName(titlesDB.TitlesMap[titleId], gameFiles)
+		var titleName string
+		if titlesDB != nil && titlesDB.TitlesMap != nil {
+			titleName = getTitleName(titlesDB.TitlesMap[titleId], gameFiles)
+		} else {
+			titleName = getTitleName(nil, gameFiles)
+		}
 
 		templateData := map[string]string{}
 		templateData[settings.TEMPLATE_TITLE_ID] = gameFiles.File.Metadata.TitleId
 		templateData[settings.TEMPLATE_TITLE_NAME] = titleName
 		templateData[settings.TEMPLATE_VERSION_TXT] = ""
-		if title, ok := titlesDB.TitlesMap[titleId]; ok {
-			templateData[settings.TEMPLATE_REGION] = title.Attributes.Region
+		if titlesDB != nil && titlesDB.TitlesMap != nil {
+			if title, ok := titlesDB.TitlesMap[titleId]; ok {
+				templateData[settings.TEMPLATE_REGION] = title.Attributes.Region
+			}
 		}
 		templateData[settings.TEMPLATE_VERSION] = "0"
 
@@ -173,7 +180,11 @@ func planOrganizeOperations(baseFolder string,
 		}
 
 		// Plan DLC file operations
-		if err := planDLCFileOperations(gameFiles, baseFolder, titlesDB.TitlesMap[titleId], options, templateData, titleName, transaction); err != nil {
+		var switchTitle *db.SwitchTitle
+		if titlesDB != nil && titlesDB.TitlesMap != nil {
+			switchTitle = titlesDB.TitlesMap[titleId]
+		}
+		if err := planDLCFileOperations(gameFiles, baseFolder, switchTitle, options, templateData, titleName, transaction); err != nil {
 			return fmt.Errorf("failed to plan DLC operations for %s: %v", titleName, err)
 		}
 	}

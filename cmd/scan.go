@@ -15,6 +15,7 @@ var (
 	folder         string
 	folders        string
 	recursive      bool
+	noRecursive    bool
 	format         string
 	locale         string
 
@@ -76,7 +77,7 @@ func init() {
 
 	// Scan options
 	scanCmd.Flags().BoolVarP(&recursive, "recursive", "r", true, "scan recursively (default: true)")
-	scanCmd.Flags().BoolVar(&recursive, "no-recursive", false, "disable recursive scanning")
+	scanCmd.Flags().BoolVar(&noRecursive, "no-recursive", false, "disable recursive scanning")
 	scanCmd.Flags().StringVar(&format, "format", "table", "output format (table, json, csv)")
 	scanCmd.Flags().StringVar(&locale, "locale", "", "locale for title names (e.g., KR.ko, US.en, JP.ja)")
 
