@@ -40,10 +40,8 @@ func DetermineOutputMode(mode OutputMode) OutputMode {
 		return mode
 	}
 
-	// Auto mode: use rich if TTY, simple otherwise
-	if isTTY() {
-		return OutputModeRich
-	}
+	// Auto mode: use simple to avoid table rendering conflicts
+	// Rich mode (Bubble Tea) can conflict with table output
 	return OutputModeSimple
 }
 
