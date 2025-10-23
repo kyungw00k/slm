@@ -98,6 +98,39 @@ slm scan -f /games --output-mode rich      # Rich TUI progress
 slm scan -f /games --output-mode json      # JSON-only output
 ```
 
+#### `slm list` - Query Game Database
+
+Query and filter games from the database created by `scan` command without re-scanning files.
+
+```bash
+# Basic listing
+slm list                                   # First 50 games (default)
+slm list --limit 10                        # Show only first 10 games
+slm list --page 2 --per-page 100           # Pagination
+
+# Filtering
+slm list --missing-updates                 # Games with available updates
+slm list --missing-dlc                     # Games with available DLC
+slm list --title "zelda"                   # Search by title (case-insensitive)
+slm list --title-id 0100f2c                # Search by title ID prefix
+
+# Sorting
+slm list --sort title                      # Sort by title name (default)
+slm list --sort title-id                   # Sort by title ID
+slm list --sort missing                    # Sort by missing content count (descending)
+
+# Output formats
+slm list --format table                    # Human-readable table (default)
+slm list --format json                     # JSON for scripting
+slm list --format csv                      # CSV for spreadsheets
+
+# Combined examples
+slm list --missing-updates --sort missing --limit 20   # Top 20 games needing updates
+slm list --title "pokemon" --format json               # Search Pokemon games as JSON
+```
+
+**Note**: The `list` command uses the locale priority from `config.json`. Change locale priority with `slm config locale_priority '["US.en", "KR.ko", "JP.ja"]'` and the titles will update immediately without re-scanning.
+
 #### `slm config` - Configuration Management
 
 ```bash
@@ -193,6 +226,10 @@ SLM uses a configuration file located at `$HOME/.config/slm/config.json` (or `$H
 ### Key Configuration Options
 
 - **locale_priority**: Language preference order for title names
+  - Determines which language is displayed in scan/list output
+  - Supported locales: `KR.ko` (Korean), `US.en` (English), `JP.ja` (Japanese)
+  - Changes take effect immediately without database rebuild
+  - Example: `["KR.ko", "JP.ja", "US.en"]` shows Korean first, falls back to Japanese, then English
 - **prod_keys**: Path to Nintendo Switch keys file (optional but recommended)
 - **organize_options**: Default organization behavior
 - **ignore_dlc_title_ids**: DLC titles to skip during checks
@@ -372,9 +409,15 @@ slm scan -F "/games,/dlc" --format csv > library-report.csv
 # Scan with custom performance settings
 slm scan -f /network/games --max-workers 24 --memory-limit 4096
 
-# Multi-language setup with Korean priority
-slm config locale_priority '["KR.ko", "JP.ja", "US.en"]'
-slm scan -f /games --locale KR.ko
+# Multi-language setup - change language preference on the fly
+slm config locale_priority '["KR.ko", "JP.ja", "US.en"]'  # Korean priority
+slm list --limit 5                                         # Shows Korean titles
+
+slm config locale_priority '["US.en", "KR.ko", "JP.ja"]'  # English priority
+slm list --limit 5                                         # Shows English titles (no DB rebuild needed!)
+
+slm config locale_priority '["JP.ja", "KR.ko", "US.en"]'  # Japanese priority
+slm list --limit 5                                         # Shows Japanese titles
 
 # Automated missing content checking
 slm scan -f /games --check-all --format json | jq '.missing_content | length'
